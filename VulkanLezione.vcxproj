@@ -88,6 +88,26 @@
   <ItemGroup>
     <ClCompile Include="VulkanLezione.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="shaders\color-frag.glsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">glslc -O -o $(SolutionDir)%(Identity).spv -fshader-stage=frag $(SolutionDir)%(Identity)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)%(Identity).spv</Outputs>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">glslc -O -o $(SolutionDir)%(Identity).spv -fshader-stage=frag $(SolutionDir)%(Identity)</Command>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)%(Identity).spv</Outputs>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling Shader $(SolutionDir)%(Identity).spv</Message>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling Shader $(SolutionDir)%(Identity).spv</Message>
+    </CustomBuild>
+    <CustomBuild Include="shaders\color-vert.glsl">
+      <FileType>Document</FileType>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">glslc -O -o $(SolutionDir)%(Identity).spv -fshader-stage=vert $(SolutionDir)%(Identity)</Command>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">glslc -O -o $(SolutionDir)%(Identity).spv -fshader-stage=vert $(SolutionDir)%(Identity)</Command>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling Shader $(SolutionDir)%(Identity).spv</Message>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling Shader $(SolutionDir)%(Identity).spv</Message>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(SolutionDir)%(Identity).spv</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(SolutionDir)%(Identity).spv</Outputs>
+    </CustomBuild>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

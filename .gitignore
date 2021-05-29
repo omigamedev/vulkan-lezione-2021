@@ -1,3 +1,4 @@
 /VulkanLezione.vcxproj.user
 .vs/
 x64/
+/shaders/*.spv

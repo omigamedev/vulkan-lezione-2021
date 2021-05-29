@@ -1,6 +1,7 @@
 #include <vulkan/vulkan.hpp>
 #include <iostream>
 #include <vector>
+#include <fstream>
 
 #define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
@@ -12,6 +13,12 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+
+struct vertex_t 
+{
+    glm::vec3 pos;
+    glm::vec3 col;
+};
 
 LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -57,10 +64,32 @@ std::pair<glm::ivec2, std::unique_ptr<uint8_t>> load_image(const char* path)
     return { glm::ivec2(w, h), std::move(data) };
 }
 
+vk::UniqueShaderModule load_shader(const vk::UniqueDevice& device, const std::string& path)
+{
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    size_t size = file.tellg();
+    file.seekg(std::ios::beg);
+    auto buffer = std::make_unique<char[]>(size);
+    file.read(buffer.get(), size);
+
+    vk::ShaderModuleCreateInfo module_info;
+    module_info.codeSize = size;
+    module_info.pCode = reinterpret_cast<uint32_t*>(buffer.get());
+    return device->createShaderModuleUnique(module_info);
+}
+
+uint32_t find_memory(const vk::PhysicalDevice& physical_device, 
+    const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags)
+{
+    static vk::PhysicalDeviceMemoryProperties mp = physical_device.getMemoryProperties();
+    for (uint32_t mem_i = 0; mem_i < mp.memoryTypeCount; mem_i++)
+        if ((1 << mem_i) & req.memoryTypeBits && (mp.memoryTypes[mem_i].propertyFlags & flags) == flags)
+            return mem_i;
+    throw std::runtime_error("find_memory failed");
+}
+
 int main()
 {
-    auto image = load_image("vulkan-logo.png");
-    std::cout << "image size: " << image.first.x << " x " << image.first.y << "\n";
     std::vector<const char*> inst_layers;
     inst_layers.emplace_back("VK_LAYER_KHRONOS_validation");
     std::vector<const char*> inst_extensions;
@@ -92,14 +121,15 @@ int main()
     for (auto pd : inst->enumeratePhysicalDevices())
     {
         std::vector<vk::QueueFamilyProperties> families = pd.getQueueFamilyProperties();
+        vk::PhysicalDeviceProperties props = pd.getProperties();
         for (int family_index = 0; family_index < families.size(); family_index++)
         {
             if (families[family_index].queueFlags & vk::QueueFlagBits::eGraphics
-                && pd.getSurfaceSupportKHR(family_index, *surface))
+                && pd.getSurfaceSupportKHR(family_index, *surface)
+                && props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu)
             {
-                vk::PhysicalDeviceProperties props = pd.getProperties();
                 std::cout << "Device trovato: " << props.deviceName << "\n";
-
+        
                 device_family_index = family_index;
                 physical_device = pd;
 
@@ -147,10 +177,179 @@ int main()
     pool_info.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
     vk::UniqueCommandPool cmd_pool = device->createCommandPoolUnique(pool_info);
 
+    // Create Vertex and Index buffer
+    std::vector<uint32_t> quad_indices{ 0, 1, 2, 0, 2, 3 };
+    std::vector<vertex_t> quad_vertices{
+        vertex_t{glm::vec3(-1, 1, 0), glm::vec3(1, 0, 0)},
+        vertex_t{glm::vec3(-1,-1, 0), glm::vec3(1, 1, 0)},
+        vertex_t{glm::vec3( 1,-1, 0), glm::vec3(0, 1, 1)},
+        vertex_t{glm::vec3( 1, 1, 0), glm::vec3(1, 0, 1)},
+    };
+    vk::BufferCreateInfo quad_buffer_info;
+    quad_buffer_info.size = quad_indices.size() * sizeof(uint32_t)
+        + quad_vertices.size() * sizeof(vertex_t);
+    quad_buffer_info.usage = vk::BufferUsageFlagBits::eIndexBuffer
+        | vk::BufferUsageFlagBits::eVertexBuffer;
+    vk::UniqueBuffer quad_buffer = device->createBufferUnique(quad_buffer_info);
+    vk::MemoryRequirements quad_buffer_req = device->getBufferMemoryRequirements(*quad_buffer);
+    uint32_t quad_memory_index = find_memory(physical_device, quad_buffer_req,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    vk::MemoryAllocateInfo quad_buffer_mem_info;
+    quad_buffer_mem_info.allocationSize = quad_buffer_req.size;
+    quad_buffer_mem_info.memoryTypeIndex = quad_memory_index;
+    vk::UniqueDeviceMemory quad_buffer_mem = device->allocateMemoryUnique(quad_buffer_mem_info);
+    device->bindBufferMemory(*quad_buffer, *quad_buffer_mem, 0);
+
+    if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*quad_buffer_mem, 0, VK_WHOLE_SIZE)))
+    {
+        std::copy(quad_indices.begin(), quad_indices.end(), reinterpret_cast<uint32_t*>(ptr));
+        std::copy(quad_vertices.begin(), quad_vertices.end(), 
+            reinterpret_cast<vertex_t*>(ptr + quad_indices.size() * sizeof(uint32_t)));
+        device->unmapMemory(*quad_buffer_mem);
+    }
+
+    // Pipeline Layout
+    std::vector<vk::DescriptorSetLayoutBinding> descrset_layout_bindings{
+        //vk::DescriptorSetLayoutBinding(0, )
+    };
+    vk::DescriptorSetLayoutCreateInfo descrset_layout_info;
+    descrset_layout_info.setBindings(descrset_layout_bindings);
+    vk::UniqueDescriptorSetLayout descrset_layout = device->createDescriptorSetLayoutUnique(descrset_layout_info);
+    vk::PipelineLayoutCreateInfo pipeline_layout_info;
+    pipeline_layout_info.setSetLayouts(*descrset_layout);
+    vk::UniquePipelineLayout pipeline_layout = device->createPipelineLayoutUnique(pipeline_layout_info);
+
+    // Create RenderPass
+    std::vector<vk::AttachmentDescription> renderpass_attachments(1);
+    renderpass_attachments[0].format = swapchain_info.imageFormat;
+    renderpass_attachments[0].samples = vk::SampleCountFlagBits::e1;
+    renderpass_attachments[0].loadOp = vk::AttachmentLoadOp::eClear;
+    renderpass_attachments[0].storeOp = vk::AttachmentStoreOp::eStore;
+    renderpass_attachments[0].stencilLoadOp = vk::AttachmentLoadOp::eDontCare;
+    renderpass_attachments[0].stencilStoreOp = vk::AttachmentStoreOp::eDontCare;
+    renderpass_attachments[0].initialLayout = vk::ImageLayout::eColorAttachmentOptimal;
+    renderpass_attachments[0].finalLayout = vk::ImageLayout::ePresentSrcKHR;
+    std::vector<vk::SubpassDescription> renderpass_subpasses(1);
+    vk::AttachmentReference renderpass_ref_coolor;
+    renderpass_ref_coolor.attachment = 0;
+    renderpass_ref_coolor.layout = vk::ImageLayout::eColorAttachmentOptimal;
+    renderpass_subpasses[0].pipelineBindPoint = vk::PipelineBindPoint::eGraphics;
+    renderpass_subpasses[0].setColorAttachments(renderpass_ref_coolor);
+    vk::RenderPassCreateInfo renderpass_info;
+    renderpass_info.setAttachments(renderpass_attachments);
+    renderpass_info.setSubpasses(renderpass_subpasses);
+    vk::UniqueRenderPass renderpass = device->createRenderPassUnique(renderpass_info);
+
+    // Load Shader modules
+    auto VertexModule = load_shader(device, "shaders/color-vert.glsl.spv");
+    auto FragmentModule = load_shader(device, "shaders/color-frag.glsl.spv");
+    
+    // Create Pipeline
+    std::vector<vk::PipelineShaderStageCreateInfo> pipeline_stages{
+        vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eVertex,* VertexModule, "main"),
+        vk::PipelineShaderStageCreateInfo({}, vk::ShaderStageFlagBits::eFragment, *FragmentModule, "main"),
+    };
+    std::vector<vk::VertexInputBindingDescription> pipeline_input_bindings{
+        vk::VertexInputBindingDescription(0, sizeof(vertex_t), vk::VertexInputRate::eVertex),
+    };
+    std::vector<vk::VertexInputAttributeDescription> pipeline_input_attributes{
+        vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, offsetof(vertex_t, pos)),
+        vk::VertexInputAttributeDescription(1, 0, vk::Format::eR32G32B32Sfloat, offsetof(vertex_t, col)),
+    };
+    vk::PipelineVertexInputStateCreateInfo pipeline_input;
+    pipeline_input.setVertexBindingDescriptions(pipeline_input_bindings);
+    pipeline_input.setVertexAttributeDescriptions(pipeline_input_attributes);
+
+    vk::PipelineInputAssemblyStateCreateInfo pipeline_assembly;
+    pipeline_assembly.topology = vk::PrimitiveTopology::eTriangleList;
+    pipeline_assembly.primitiveRestartEnable = false;
+
+    vk::Viewport viewport{ 0, 0,
+        (float)surface_caps.currentExtent.width, 
+        (float)surface_caps.currentExtent.height };
+    vk::Rect2D scissor{ {}, surface_caps.currentExtent };
+    vk::PipelineViewportStateCreateInfo pipeline_viewport;
+    pipeline_viewport.setViewports(viewport);
+    pipeline_viewport.setScissors(scissor);
+
+    vk::PipelineRasterizationStateCreateInfo pipeline_raster;
+    pipeline_raster.depthClampEnable = false;
+    pipeline_raster.rasterizerDiscardEnable = false;
+    pipeline_raster.polygonMode = vk::PolygonMode::eFill;
+    pipeline_raster.cullMode = vk::CullModeFlagBits::eNone;
+    pipeline_raster.frontFace = vk::FrontFace::eClockwise;
+    pipeline_raster.depthBiasEnable = false;
+    pipeline_raster.lineWidth = 1.f;
+
+    vk::PipelineMultisampleStateCreateInfo pipeline_multisample;
+    pipeline_multisample.rasterizationSamples = vk::SampleCountFlagBits::e1;
+    pipeline_multisample.sampleShadingEnable = false;
+
+    vk::PipelineDepthStencilStateCreateInfo pipeline_depth;
+    pipeline_depth.depthTestEnable = false;
+    pipeline_depth.stencilTestEnable = false;
+
+    vk::ColorComponentFlags color_mask =
+        vk::ColorComponentFlagBits::eR |
+        vk::ColorComponentFlagBits::eG |
+        vk::ColorComponentFlagBits::eB |
+        vk::ColorComponentFlagBits::eA;
+    std::vector<vk::PipelineColorBlendAttachmentState> pipeline_blend_attachments(1);
+    pipeline_blend_attachments[0].blendEnable = false;
+    pipeline_blend_attachments[0].colorWriteMask = color_mask;
+    vk::PipelineColorBlendStateCreateInfo pipeline_blend;
+    pipeline_blend.logicOpEnable = false;
+    pipeline_blend.setAttachments(pipeline_blend_attachments);
+
+    vk::PipelineDynamicStateCreateInfo pipeline_dynamic;
+    pipeline_dynamic.dynamicStateCount = 0;
+
+    vk::GraphicsPipelineCreateInfo pipeline_info;
+    pipeline_info.setStages(pipeline_stages);
+    pipeline_info.pVertexInputState = &pipeline_input;
+    pipeline_info.pInputAssemblyState = &pipeline_assembly;
+    pipeline_info.pTessellationState = nullptr;
+    pipeline_info.pViewportState = &pipeline_viewport;
+    pipeline_info.pRasterizationState = &pipeline_raster;
+    pipeline_info.pMultisampleState = &pipeline_multisample;
+    pipeline_info.pDepthStencilState = &pipeline_depth;
+    pipeline_info.pColorBlendState = &pipeline_blend;
+    pipeline_info.pDynamicState = &pipeline_dynamic;
+    pipeline_info.layout = *pipeline_layout;
+    pipeline_info.renderPass = *renderpass;
+    pipeline_info.subpass = 0;
+    vk::UniquePipeline pipeline = device->createGraphicsPipelineUnique(nullptr, pipeline_info).value;
+
+    /*
+    std::vector<vk::DescriptorPoolSize> descrpool_sizes{
+        //vk::DescriptorPoolSize{vk::DescriptorType::sam}
+    };
+    vk::UniqueDescriptorPool descrpool = device->createDescriptorPoolUnique(descr)
+    */
+
     vk::UniqueFence fence = device->createFenceUnique(vk::FenceCreateInfo());
     std::vector<vk::Image> swapchain_images = device->getSwapchainImagesKHR(*swapchain);
     vk::UniqueCommandBuffer cmd = std::move(
         device->allocateCommandBuffersUnique({ *cmd_pool, vk::CommandBufferLevel::ePrimary, 1 }).front());
+    std::vector<vk::UniqueImageView> swapchain_views(2);
+    std::vector<vk::UniqueFramebuffer> framebuffers(2);
+    for (int i = 0; i < 2; i++)
+    {
+        vk::ImageViewCreateInfo fb_view_info;
+        fb_view_info.image = swapchain_images[i];
+        fb_view_info.viewType = vk::ImageViewType::e2D;
+        fb_view_info.format = swapchain_info.imageFormat;
+        fb_view_info.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+        swapchain_views[i] = device->createImageViewUnique(fb_view_info);
+        
+        vk::FramebufferCreateInfo fb_info;
+        fb_info.renderPass = *renderpass;
+        fb_info.setAttachments(*swapchain_views[i]);
+        fb_info.width = surface_caps.currentExtent.width;
+        fb_info.height = surface_caps.currentExtent.height;
+        fb_info.layers = 1;
+        framebuffers[i] = device->createFramebufferUnique(fb_info);
+    }
 
     MSG msg;
     float alpha = 0;
@@ -173,24 +372,28 @@ int main()
             barrier.image = swapchain_images[next_image.value];
             barrier.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
             barrier.srcAccessMask = {};
-            barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+            barrier.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
             barrier.oldLayout = vk::ImageLayout::eUndefined;
-            barrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+            barrier.newLayout = vk::ImageLayout::eColorAttachmentOptimal;
             cmd->pipelineBarrier(
-                vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
+                vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eColorAttachmentOutput,
                 vk::DependencyFlagBits::eByRegion, nullptr, nullptr, barrier);
-
-            cmd->clearColorImage(swapchain_images[next_image.value],
-                vk::ImageLayout::eTransferDstOptimal, color, barrier.subresourceRange);
-
-            barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-            barrier.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
-            barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
-            barrier.newLayout = vk::ImageLayout::ePresentSrcKHR;
-            cmd->pipelineBarrier(
-                vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands,
-                vk::DependencyFlagBits::eByRegion, nullptr, nullptr, barrier);
-
+            std::vector<vk::ClearValue> clear_values{
+                vk::ClearColorValue(color),
+            };
+            vk::RenderPassBeginInfo renderpass_begin_info;
+            renderpass_begin_info.renderPass = *renderpass;
+            renderpass_begin_info.framebuffer = *framebuffers[next_image.value];
+            renderpass_begin_info.renderArea = scissor;
+            renderpass_begin_info.setClearValues(clear_values);
+            cmd->beginRenderPass(renderpass_begin_info, vk::SubpassContents::eInline);
+            {
+                cmd->bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
+                cmd->bindVertexBuffers(0, *quad_buffer, { quad_indices.size() * sizeof(uint32_t) });
+                cmd->bindIndexBuffer(*quad_buffer, 0, vk::IndexType::eUint32);
+                cmd->drawIndexed(quad_indices.size(), 1, 0, 0, 0);
+            }
+            cmd->endRenderPass();
             cmd->end();
 
             vk::SubmitInfo submit_info;
