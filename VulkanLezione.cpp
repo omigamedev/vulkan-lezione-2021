@@ -415,6 +415,16 @@ int main()
             DispatchMessage(&msg);
         }
         alpha += 0.1f;
+
+        // update uniform
+        if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*quad_buffer_mem, quad_uniform_off, quad_uniform_size)))
+        {
+            reinterpret_cast<uniform_t*>(ptr)->model = 
+                glm::eulerAngleZ(alpha)
+                * glm::scale(glm::vec3(0.5f));
+            device->unmapMemory(*quad_buffer_mem);
+        }
+
         auto next_image = device->acquireNextImageKHR(*swapchain, UINT64_MAX, nullptr, *fence);
         if (next_image.result == vk::Result::eSuccess)
         {
@@ -469,6 +479,6 @@ int main()
         device->resetFences(*fence);
 
     }
-
+    descrset.reset();
     return EXIT_SUCCESS;
 }
