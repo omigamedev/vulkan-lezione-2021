@@ -2,6 +2,9 @@
 #include <iostream>
 #include <vector>
 #include <fstream>
+#include <deque>
+#include <map>
+#include <list>
 
 #define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
@@ -19,6 +22,26 @@ struct vertex_t
     glm::vec3 pos;
     glm::vec3 col;
 };
+
+struct uniform_t
+{
+    glm::mat4 model;
+};
+
+size_t aligned_size(size_t sz, size_t alignment)
+{
+    return ((sz - 1) & alignment) + alignment;
+}
+template <typename T>
+size_t aligned_size(const std::vector<T>& v, size_t alignment)
+{
+    return aligned_size(sizeof(T) * T.size(), alignment);
+}
+template <typename T, size_t N>
+size_t aligned_size(const std::array<T, N>& v, size_t alignment)
+{
+    return aligned_size(sizeof(T) * N, alignment);
+}
 
 LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -178,6 +201,9 @@ int main()
     vk::UniqueCommandPool cmd_pool = device->createCommandPoolUnique(pool_info);
 
     // Create Vertex and Index buffer
+    uniform_t uniform_block;
+    uniform_block.model = glm::scale(glm::vec3(0.5));
+
     std::vector<uint32_t> quad_indices{ 0, 1, 2, 0, 2, 3 };
     std::vector<vertex_t> quad_vertices{
         vertex_t{glm::vec3(-1, 1, 0), glm::vec3(1, 0, 0)},
@@ -185,11 +211,19 @@ int main()
         vertex_t{glm::vec3( 1,-1, 0), glm::vec3(0, 1, 1)},
         vertex_t{glm::vec3( 1, 1, 0), glm::vec3(1, 0, 1)},
     };
+    size_t quad_indices_off = 0;
+    size_t quad_indices_size = aligned_size(quad_indices.size() * sizeof(uint32_t), 0x100);
+    size_t quad_vertices_off = quad_indices_off + quad_indices_size;
+    size_t quad_vertices_size = aligned_size(quad_vertices.size() * sizeof(vertex_t), 0x100);
+    size_t quad_uniform_off = quad_vertices_off + quad_vertices_size;
+    size_t quad_uniform_size = aligned_size(sizeof(uniform_block), 0x100);
     vk::BufferCreateInfo quad_buffer_info;
-    quad_buffer_info.size = quad_indices.size() * sizeof(uint32_t)
-        + quad_vertices.size() * sizeof(vertex_t);
+    quad_buffer_info.size = quad_indices_size
+        + quad_vertices_size
+        + quad_uniform_size;
     quad_buffer_info.usage = vk::BufferUsageFlagBits::eIndexBuffer
-        | vk::BufferUsageFlagBits::eVertexBuffer;
+        | vk::BufferUsageFlagBits::eVertexBuffer
+        | vk::BufferUsageFlagBits::eUniformBuffer;
     vk::UniqueBuffer quad_buffer = device->createBufferUnique(quad_buffer_info);
     vk::MemoryRequirements quad_buffer_req = device->getBufferMemoryRequirements(*quad_buffer);
     uint32_t quad_memory_index = find_memory(physical_device, quad_buffer_req,
@@ -202,15 +236,17 @@ int main()
 
     if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*quad_buffer_mem, 0, VK_WHOLE_SIZE)))
     {
-        std::copy(quad_indices.begin(), quad_indices.end(), reinterpret_cast<uint32_t*>(ptr));
+        std::copy(quad_indices.begin(), quad_indices.end(), 
+            reinterpret_cast<uint32_t*>(ptr + quad_indices_off));
         std::copy(quad_vertices.begin(), quad_vertices.end(), 
-            reinterpret_cast<vertex_t*>(ptr + quad_indices.size() * sizeof(uint32_t)));
+            reinterpret_cast<vertex_t*>(ptr + quad_vertices_off));
+        *reinterpret_cast<uniform_t*>(ptr + quad_uniform_off) = uniform_block;
         device->unmapMemory(*quad_buffer_mem);
     }
 
     // Pipeline Layout
     std::vector<vk::DescriptorSetLayoutBinding> descrset_layout_bindings{
-        //vk::DescriptorSetLayoutBinding(0, )
+        vk::DescriptorSetLayoutBinding(0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex),
     };
     vk::DescriptorSetLayoutCreateInfo descrset_layout_info;
     descrset_layout_info.setBindings(descrset_layout_bindings);
@@ -320,12 +356,29 @@ int main()
     pipeline_info.subpass = 0;
     vk::UniquePipeline pipeline = device->createGraphicsPipelineUnique(nullptr, pipeline_info).value;
 
-    /*
     std::vector<vk::DescriptorPoolSize> descrpool_sizes{
-        //vk::DescriptorPoolSize{vk::DescriptorType::sam}
+        vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 1},
     };
-    vk::UniqueDescriptorPool descrpool = device->createDescriptorPoolUnique(descr)
-    */
+    vk::DescriptorPoolCreateInfo descrpool_info;
+    descrpool_info.maxSets = 1;
+    descrpool_info.setPoolSizes(descrpool_sizes);
+    vk::UniqueDescriptorPool descrpool = device->createDescriptorPoolUnique(descrpool_info);
+
+    vk::DescriptorSetAllocateInfo descrset_info;
+    descrset_info.descriptorPool = *descrpool;
+    descrset_info.descriptorSetCount = 1;
+    descrset_info.setSetLayouts(*descrset_layout);
+    vk::UniqueDescriptorSet descrset = std::move(device->allocateDescriptorSetsUnique(descrset_info).front());
+
+    vk::DescriptorBufferInfo descr_sets_write_uniform;
+    descr_sets_write_uniform.buffer = *quad_buffer;
+    descr_sets_write_uniform.offset = quad_uniform_off;
+    descr_sets_write_uniform.range = quad_uniform_size;
+    std::vector<vk::WriteDescriptorSet> descr_sets_write{
+        vk::WriteDescriptorSet(*descrset, 0, 0, 1, vk::DescriptorType::eUniformBuffer, 
+            nullptr, &descr_sets_write_uniform, nullptr),
+    };
+    device->updateDescriptorSets(descr_sets_write, nullptr);
 
     vk::UniqueFence fence = device->createFenceUnique(vk::FenceCreateInfo());
     std::vector<vk::Image> swapchain_images = device->getSwapchainImagesKHR(*swapchain);
@@ -389,8 +442,9 @@ int main()
             cmd->beginRenderPass(renderpass_begin_info, vk::SubpassContents::eInline);
             {
                 cmd->bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
-                cmd->bindVertexBuffers(0, *quad_buffer, { quad_indices.size() * sizeof(uint32_t) });
+                cmd->bindVertexBuffers(0, *quad_buffer, { quad_vertices_off });
                 cmd->bindIndexBuffer(*quad_buffer, 0, vk::IndexType::eUint32);
+                cmd->bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0, *descrset, nullptr);
                 cmd->drawIndexed(quad_indices.size(), 1, 0, 0, 0);
             }
             cmd->endRenderPass();
