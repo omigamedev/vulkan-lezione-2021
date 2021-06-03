@@ -209,6 +209,34 @@ int main()
     // Load texture
     auto image = load_image("vulkan-logo.png");
     // Create staging texture
+    vk::ImageCreateInfo staging_info;
+    staging_info.imageType = vk::ImageType::e2D;
+    staging_info.format = vk::Format::eR8G8B8A8Unorm;
+    staging_info.extent = vk::Extent3D(image.first.x, image.first.y, 1);
+    staging_info.mipLevels = 1;
+    staging_info.arrayLayers = 1;
+    staging_info.samples = vk::SampleCountFlagBits::e1;
+    staging_info.tiling = vk::ImageTiling::eLinear;
+    staging_info.usage = vk::ImageUsageFlagBits::eTransferSrc;
+    staging_info.initialLayout = vk::ImageLayout::ePreinitialized;
+    vk::UniqueImage staging = device->createImageUnique(staging_info);
+    vk::MemoryRequirements staging_mem_req = device->getImageMemoryRequirements(*staging);
+    uint32_t staging_mem_idx = find_memory(physical_device, staging_mem_req,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    vk::UniqueDeviceMemory staging_mem = device->allocateMemoryUnique({ staging_mem_req.size, staging_mem_idx });
+    device->bindImageMemory(*staging, *staging_mem, 0);
+    vk::SubresourceLayout staging_layout = device->getImageSubresourceLayout(*staging,
+        vk::ImageSubresource(vk::ImageAspectFlagBits::eColor, 0, 0));
+    if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*staging_mem, 0, VK_WHOLE_SIZE)))
+    {
+        for (int row = 0; row < image.first.y; row++)
+            std::copy_n(
+                image.second.get() + row * image.first.x * 4,
+                image.first.x * 4,
+                ptr + row * staging_layout.rowPitch);
+        device->unmapMemory(*staging_mem);
+    }
+
     vk::ImageCreateInfo tex_info;
     tex_info.imageType = vk::ImageType::e2D;
     tex_info.format = vk::Format::eR8G8B8A8Unorm;
@@ -217,30 +245,19 @@ int main()
     tex_info.arrayLayers = 1;
     tex_info.samples = vk::SampleCountFlagBits::e1;
     tex_info.tiling = vk::ImageTiling::eLinear;
-    tex_info.usage = vk::ImageUsageFlagBits::eSampled;
-    tex_info.initialLayout = vk::ImageLayout::ePreinitialized;
+    tex_info.usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+    tex_info.initialLayout = vk::ImageLayout::eUndefined;
     vk::UniqueImage tex = device->createImageUnique(tex_info);
     vk::MemoryRequirements tex_mem_req = device->getImageMemoryRequirements(*tex);
     uint32_t tex_mem_idx = find_memory(physical_device, tex_mem_req,
-        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+        vk::MemoryPropertyFlagBits::eDeviceLocal);
     vk::UniqueDeviceMemory tex_mem = device->allocateMemoryUnique({ tex_mem_req.size, tex_mem_idx });
     device->bindImageMemory(*tex, *tex_mem, 0);
-    vk::SubresourceLayout tex_layout = device->getImageSubresourceLayout(*tex,
-        vk::ImageSubresource(vk::ImageAspectFlagBits::eColor, 0, 0));
-    if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*tex_mem, 0, VK_WHOLE_SIZE)))
-    {
-        for (int row = 0; row < image.first.y; row++)
-            std::copy_n(
-                image.second.get() + row * image.first.x * 4,
-                image.first.x * 4,
-                ptr + row * tex_layout.rowPitch);
-        device->unmapMemory(*tex_mem);
-    }
 
     vk::ImageViewCreateInfo tex_view_info;
     tex_view_info.image = *tex;
     tex_view_info.viewType = vk::ImageViewType::e2D;
-    tex_view_info.format = tex_info.format;
+    tex_view_info.format = staging_info.format;
     tex_view_info.components = vk::ComponentMapping();
     tex_view_info.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
     tex_view_info.subresourceRange.baseMipLevel = 0;
@@ -263,15 +280,50 @@ int main()
     cmd_tex->begin(vk::CommandBufferBeginInfo({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit }));
     {
         vk::ImageMemoryBarrier barrier;
-        barrier.image = *tex;
         barrier.subresourceRange = tex_view_info.subresourceRange;
 
+        barrier.image = *staging;
         barrier.srcAccessMask = {};
-        barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+        barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
         barrier.oldLayout = vk::ImageLayout::ePreinitialized;
-        barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        barrier.newLayout = vk::ImageLayout::eTransferSrcOptimal;
         cmd_tex->pipelineBarrier(
             vk::PipelineStageFlagBits::eAllCommands,
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::DependencyFlagBits::eByRegion,
+            nullptr, nullptr, barrier);
+
+        barrier.image = *tex;
+        barrier.srcAccessMask = {};
+        barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+        barrier.oldLayout = vk::ImageLayout::eUndefined;
+        barrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+        cmd_tex->pipelineBarrier(
+            vk::PipelineStageFlagBits::eAllCommands,
+            vk::PipelineStageFlagBits::eTransfer,
+            vk::DependencyFlagBits::eByRegion,
+            nullptr, nullptr, barrier);
+
+        vk::ImageCopy copy;
+        copy.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+        copy.srcSubresource.mipLevel = 0;
+        copy.srcSubresource.baseArrayLayer = 0;
+        copy.srcSubresource.layerCount = 1;
+        copy.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+        copy.dstSubresource.mipLevel = 0;
+        copy.dstSubresource.baseArrayLayer = 0;
+        copy.dstSubresource.layerCount = 1;
+        copy.extent = tex_info.extent;
+        cmd_tex->copyImage(*staging, vk::ImageLayout::eTransferSrcOptimal,
+            *tex, vk::ImageLayout::eTransferDstOptimal, copy);
+    
+        barrier.image = *tex;
+        barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+        barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+        barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+        barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        cmd_tex->pipelineBarrier(
+            vk::PipelineStageFlagBits::eTransfer,
             vk::PipelineStageFlagBits::eFragmentShader,
             vk::DependencyFlagBits::eByRegion,
             nullptr, nullptr, barrier);
