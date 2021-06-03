@@ -21,11 +21,17 @@ struct vertex_t
 {
     glm::vec3 pos;
     glm::vec3 col;
+    glm::vec2 uvs;
 };
 
-struct uniform_t
+struct uniform_vertex_t
 {
     glm::mat4 model;
+};
+
+struct uniform_fragment_t
+{
+    glm::vec4 tint;
 };
 
 size_t aligned_size(size_t sz, size_t alignment)
@@ -200,27 +206,104 @@ int main()
     pool_info.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
     vk::UniqueCommandPool cmd_pool = device->createCommandPoolUnique(pool_info);
 
-    // Create Vertex and Index buffer
-    uniform_t uniform_block;
-    uniform_block.model = glm::scale(glm::vec3(0.5));
+    // Load texture
+    auto image = load_image("vulkan-logo.png");
+    // Create staging texture
+    vk::ImageCreateInfo tex_info;
+    tex_info.imageType = vk::ImageType::e2D;
+    tex_info.format = vk::Format::eR8G8B8A8Unorm;
+    tex_info.extent = vk::Extent3D(image.first.x, image.first.y, 1);
+    tex_info.mipLevels = 1;
+    tex_info.arrayLayers = 1;
+    tex_info.samples = vk::SampleCountFlagBits::e1;
+    tex_info.tiling = vk::ImageTiling::eLinear;
+    tex_info.usage = vk::ImageUsageFlagBits::eSampled;
+    tex_info.initialLayout = vk::ImageLayout::ePreinitialized;
+    vk::UniqueImage tex = device->createImageUnique(tex_info);
+    vk::MemoryRequirements tex_mem_req = device->getImageMemoryRequirements(*tex);
+    uint32_t tex_mem_idx = find_memory(physical_device, tex_mem_req,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    vk::UniqueDeviceMemory tex_mem = device->allocateMemoryUnique({ tex_mem_req.size, tex_mem_idx });
+    device->bindImageMemory(*tex, *tex_mem, 0);
+    vk::SubresourceLayout tex_layout = device->getImageSubresourceLayout(*tex,
+        vk::ImageSubresource(vk::ImageAspectFlagBits::eColor, 0, 0));
+    if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*tex_mem, 0, VK_WHOLE_SIZE)))
+    {
+        for (int row = 0; row < image.first.y; row++)
+            std::copy_n(
+                image.second.get() + row * image.first.x * 4,
+                image.first.x * 4,
+                ptr + row * tex_layout.rowPitch);
+        device->unmapMemory(*tex_mem);
+    }
 
+    vk::ImageViewCreateInfo tex_view_info;
+    tex_view_info.image = *tex;
+    tex_view_info.viewType = vk::ImageViewType::e2D;
+    tex_view_info.format = tex_info.format;
+    tex_view_info.components = vk::ComponentMapping();
+    tex_view_info.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+    tex_view_info.subresourceRange.baseMipLevel = 0;
+    tex_view_info.subresourceRange.levelCount = 1;
+    tex_view_info.subresourceRange.baseArrayLayer = 0;
+    tex_view_info.subresourceRange.layerCount = 1;
+    vk::UniqueImageView tex_view = device->createImageViewUnique(tex_view_info);
+
+    vk::SamplerCreateInfo sampler_info;
+    sampler_info.minFilter = vk::Filter::eLinear;
+    sampler_info.magFilter = vk::Filter::eLinear;
+    vk::UniqueSampler sampler = device->createSamplerUnique(sampler_info);
+
+    vk::CommandBufferAllocateInfo cmd_tex_info;
+    cmd_tex_info.commandPool = *cmd_pool;
+    cmd_tex_info.level = vk::CommandBufferLevel::ePrimary;
+    cmd_tex_info.commandBufferCount = 1;
+    vk::UniqueCommandBuffer cmd_tex = std::move(
+        device->allocateCommandBuffersUnique(cmd_tex_info).front());
+    cmd_tex->begin(vk::CommandBufferBeginInfo({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit }));
+    {
+        vk::ImageMemoryBarrier barrier;
+        barrier.image = *tex;
+        barrier.subresourceRange = tex_view_info.subresourceRange;
+
+        barrier.srcAccessMask = {};
+        barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+        barrier.oldLayout = vk::ImageLayout::ePreinitialized;
+        barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        cmd_tex->pipelineBarrier(
+            vk::PipelineStageFlagBits::eAllCommands,
+            vk::PipelineStageFlagBits::eFragmentShader,
+            vk::DependencyFlagBits::eByRegion,
+            nullptr, nullptr, barrier);
+    }
+    cmd_tex->end();
+
+    vk::SubmitInfo cmd_tex_submit_info;
+    cmd_tex_submit_info.setCommandBuffers(*cmd_tex);
+    q.submit(cmd_tex_submit_info);
+    q.waitIdle();
+
+    // Create Vertex and Index buffer
     std::vector<uint32_t> quad_indices{ 0, 1, 2, 0, 2, 3 };
     std::vector<vertex_t> quad_vertices{
-        vertex_t{glm::vec3(-1, 1, 0), glm::vec3(1, 0, 0)},
-        vertex_t{glm::vec3(-1,-1, 0), glm::vec3(1, 1, 0)},
-        vertex_t{glm::vec3( 1,-1, 0), glm::vec3(0, 1, 1)},
-        vertex_t{glm::vec3( 1, 1, 0), glm::vec3(1, 0, 1)},
+        vertex_t{glm::vec3(-1,-1, 0), glm::vec3(1, 0, 0), glm::vec2(0, 0)},
+        vertex_t{glm::vec3(-1, 1, 0), glm::vec3(1, 1, 0), glm::vec2(0, 1)},
+        vertex_t{glm::vec3( 1, 1, 0), glm::vec3(0, 1, 1), glm::vec2(1, 1)},
+        vertex_t{glm::vec3( 1,-1, 0), glm::vec3(1, 0, 1), glm::vec2(1, 0)},
     };
     size_t quad_indices_off = 0;
     size_t quad_indices_size = aligned_size(quad_indices.size() * sizeof(uint32_t), 0x100);
     size_t quad_vertices_off = quad_indices_off + quad_indices_size;
     size_t quad_vertices_size = aligned_size(quad_vertices.size() * sizeof(vertex_t), 0x100);
-    size_t quad_uniform_off = quad_vertices_off + quad_vertices_size;
-    size_t quad_uniform_size = aligned_size(sizeof(uniform_block), 0x100);
+    size_t quad_uniform_vertex_off = quad_vertices_off + quad_vertices_size;
+    size_t quad_uniform_vertex_size = aligned_size(sizeof(uniform_vertex_t), 0x100);
+    size_t quad_uniform_fragment_off = quad_uniform_vertex_off + quad_uniform_vertex_size;
+    size_t quad_uniform_fragment_size = aligned_size(sizeof(uniform_fragment_t), 0x100);
     vk::BufferCreateInfo quad_buffer_info;
     quad_buffer_info.size = quad_indices_size
         + quad_vertices_size
-        + quad_uniform_size;
+        + quad_uniform_vertex_size
+        + quad_uniform_fragment_size;
     quad_buffer_info.usage = vk::BufferUsageFlagBits::eIndexBuffer
         | vk::BufferUsageFlagBits::eVertexBuffer
         | vk::BufferUsageFlagBits::eUniformBuffer;
@@ -240,13 +323,14 @@ int main()
             reinterpret_cast<uint32_t*>(ptr + quad_indices_off));
         std::copy(quad_vertices.begin(), quad_vertices.end(), 
             reinterpret_cast<vertex_t*>(ptr + quad_vertices_off));
-        *reinterpret_cast<uniform_t*>(ptr + quad_uniform_off) = uniform_block;
         device->unmapMemory(*quad_buffer_mem);
     }
 
     // Pipeline Layout
     std::vector<vk::DescriptorSetLayoutBinding> descrset_layout_bindings{
         vk::DescriptorSetLayoutBinding(0, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eVertex),
+        vk::DescriptorSetLayoutBinding(1, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eFragment),
+        vk::DescriptorSetLayoutBinding(2, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eFragment),
     };
     vk::DescriptorSetLayoutCreateInfo descrset_layout_info;
     descrset_layout_info.setBindings(descrset_layout_bindings);
@@ -291,6 +375,7 @@ int main()
     std::vector<vk::VertexInputAttributeDescription> pipeline_input_attributes{
         vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, offsetof(vertex_t, pos)),
         vk::VertexInputAttributeDescription(1, 0, vk::Format::eR32G32B32Sfloat, offsetof(vertex_t, col)),
+        vk::VertexInputAttributeDescription(2, 0, vk::Format::eR32G32Sfloat, offsetof(vertex_t, uvs)),
     };
     vk::PipelineVertexInputStateCreateInfo pipeline_input;
     pipeline_input.setVertexBindingDescriptions(pipeline_input_bindings);
@@ -357,7 +442,8 @@ int main()
     vk::UniquePipeline pipeline = device->createGraphicsPipelineUnique(nullptr, pipeline_info).value;
 
     std::vector<vk::DescriptorPoolSize> descrpool_sizes{
-        vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 1},
+        vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 2},
+        vk::DescriptorPoolSize{vk::DescriptorType::eCombinedImageSampler, 1},
     };
     vk::DescriptorPoolCreateInfo descrpool_info;
     descrpool_info.maxSets = 1;
@@ -370,13 +456,25 @@ int main()
     descrset_info.setSetLayouts(*descrset_layout);
     vk::UniqueDescriptorSet descrset = std::move(device->allocateDescriptorSetsUnique(descrset_info).front());
 
-    vk::DescriptorBufferInfo descr_sets_write_uniform;
-    descr_sets_write_uniform.buffer = *quad_buffer;
-    descr_sets_write_uniform.offset = quad_uniform_off;
-    descr_sets_write_uniform.range = quad_uniform_size;
+    vk::DescriptorBufferInfo descr_sets_write_uniform_vertex;
+    descr_sets_write_uniform_vertex.buffer = *quad_buffer;
+    descr_sets_write_uniform_vertex.offset = quad_uniform_vertex_off;
+    descr_sets_write_uniform_vertex.range = quad_uniform_vertex_size;
+    vk::DescriptorBufferInfo descr_sets_write_uniform_fragment;
+    descr_sets_write_uniform_fragment.buffer = *quad_buffer;
+    descr_sets_write_uniform_fragment.offset = quad_uniform_fragment_off;
+    descr_sets_write_uniform_fragment.range = quad_uniform_fragment_size;
+    vk::DescriptorImageInfo descr_sets_write_tex;
+    descr_sets_write_tex.sampler = *sampler;
+    descr_sets_write_tex.imageView = *tex_view;
+    descr_sets_write_tex.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
     std::vector<vk::WriteDescriptorSet> descr_sets_write{
         vk::WriteDescriptorSet(*descrset, 0, 0, 1, vk::DescriptorType::eUniformBuffer, 
-            nullptr, &descr_sets_write_uniform, nullptr),
+            nullptr, &descr_sets_write_uniform_vertex, nullptr),
+        vk::WriteDescriptorSet(*descrset, 1, 0, 1, vk::DescriptorType::eUniformBuffer,
+            nullptr, &descr_sets_write_uniform_fragment, nullptr),
+        vk::WriteDescriptorSet(*descrset, 2, 0, 1, vk::DescriptorType::eCombinedImageSampler,
+            &descr_sets_write_tex, nullptr, nullptr),
     };
     device->updateDescriptorSets(descr_sets_write, nullptr);
 
@@ -417,11 +515,15 @@ int main()
         alpha += 0.1f;
 
         // update uniform
-        if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*quad_buffer_mem, quad_uniform_off, quad_uniform_size)))
+        if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*quad_buffer_mem, 
+            quad_uniform_vertex_off, quad_uniform_vertex_size + quad_uniform_fragment_size)))
         {
-            reinterpret_cast<uniform_t*>(ptr)->model = 
-                glm::eulerAngleZ(alpha)
-                * glm::scale(glm::vec3(0.5f));
+            float aspect_ratio = (float)image.first.y / (float)image.first.x;
+            reinterpret_cast<uniform_vertex_t*>(ptr)->model = 
+                glm::eulerAngleZ(alpha * 0.1f)
+                * glm::scale(glm::vec3(0.5f, aspect_ratio * 0.5f, 1.f));
+            reinterpret_cast<uniform_fragment_t*>(ptr + quad_uniform_vertex_size)->tint = 
+                glm::vec4(1, glm::abs(glm::sin(alpha)), 1, 1);
             device->unmapMemory(*quad_buffer_mem);
         }
 
@@ -429,7 +531,7 @@ int main()
         if (next_image.result == vk::Result::eSuccess)
         {
             cmd->reset();
-            std::array color{ fabs(sinf(alpha)), 0.f, 0.f, 1.f };
+            std::array color{ 1.f, 0.f, 0.f, 1.f };
             cmd->begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
             vk::ImageMemoryBarrier barrier;
             barrier.image = swapchain_images[next_image.value];
