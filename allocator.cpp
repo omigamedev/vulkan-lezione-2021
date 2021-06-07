@@ -1,4 +1,5 @@
 #include "allocator.h"
+#include "device.h"
 
 MemoryRef::~MemoryRef()
 {
@@ -7,7 +8,7 @@ MemoryRef::~MemoryRef()
 
 void* MemoryRef::map_internal(vk::DeviceAddress offset, vk::DeviceSize size)
 {
-    return allocator->device.mapMemory(chunk->device_memory,
+    return allocator->dev.device->mapMemory(chunk->device_memory,
         chunk->offset + offset, size == VK_WHOLE_SIZE ? chunk->size : size);
 }
 
@@ -84,13 +85,14 @@ void MemoryFamily::free(const std::shared_ptr<MemoryChunk>& chunk)
     throw std::runtime_error("MemoryAllocator cannot free chunk");
 }
 
-std::shared_ptr<MemoryChunk> MemoryFamily::allocate(const vk::Device& device, uint32_t family_index, vk::DeviceSize size)
+std::shared_ptr<MemoryChunk> MemoryFamily::allocate(Device& dev, uint32_t family_index, vk::DeviceSize size)
 {
     for (auto& allocation : allocations)
         if (auto ptr = allocation.allocate(size))
             return ptr;
     // Free allocation not found, create new
-    return allocations.emplace_back(device, family_index, allocation_size).allocate(size);
+    return allocations.emplace_back(*dev.device, 
+        family_index, allocation_size).allocate(size);
 }
 
 void MemoryAllocator::free(const std::shared_ptr<MemoryChunk>& chunk)
@@ -101,11 +103,11 @@ void MemoryAllocator::free(const std::shared_ptr<MemoryChunk>& chunk)
 
 std::shared_ptr<MemoryRef> MemoryAllocator::allocate(const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags, vk::DeviceSize size)
 {
-    uint32_t family_index = find_memory(physical_device, req, flags);
+    uint32_t family_index = find_memory(req, flags);
     if (auto it = families.find(family_index); it != families.end())
-        return std::make_shared<MemoryRef>(it->second.allocate(device, family_index, size), this);
+        return std::make_shared<MemoryRef>(it->second.allocate(dev, family_index, size), this);
     if (auto alloc = families.emplace(family_index, allocation_size); alloc.second)
-        return std::make_shared<MemoryRef>(alloc.first->second.allocate(device, family_index, size), this);
+        return std::make_shared<MemoryRef>(alloc.first->second.allocate(dev, family_index, size), this);
     throw std::runtime_error("MemoryAllocator cannot allocate");
 }
 
@@ -116,23 +118,23 @@ std::shared_ptr<MemoryRef> MemoryAllocator::allocate(const vk::MemoryRequirement
 
 std::shared_ptr<MemoryRef> MemoryAllocator::allocate_bind(const vk::Image& img, vk::MemoryPropertyFlags flags)
 {
-    vk::MemoryRequirements req = device.getImageMemoryRequirements(img);
+    vk::MemoryRequirements req = dev.device->getImageMemoryRequirements(img);
     auto memref = allocate(req, flags);
-    device.bindImageMemory(img, memref->chunk->device_memory, 0);
+    dev.device->bindImageMemory(img, memref->chunk->device_memory, 0);
     return memref;
 }
 
 std::shared_ptr<MemoryRef> MemoryAllocator::allocate_bind(const vk::Buffer& buffer, vk::MemoryPropertyFlags flags)
 {
-    vk::MemoryRequirements req = device.getBufferMemoryRequirements(buffer);
+    vk::MemoryRequirements req = dev.device->getBufferMemoryRequirements(buffer);
     auto memref = allocate(req, flags);
-    device.bindBufferMemory(buffer, memref->chunk->device_memory, 0);
+    dev.device->bindBufferMemory(buffer, memref->chunk->device_memory, 0);
     return memref;
 }
 
-uint32_t MemoryAllocator::find_memory(const vk::PhysicalDevice& physical_device, const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags)
+uint32_t MemoryAllocator::find_memory(const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags)
 {
-    static vk::PhysicalDeviceMemoryProperties mp = physical_device.getMemoryProperties();
+    static vk::PhysicalDeviceMemoryProperties mp = dev.physical_device.getMemoryProperties();
     for (uint32_t mem_i = 0; mem_i < mp.memoryTypeCount; mem_i++)
         if ((1 << mem_i) & req.memoryTypeBits && (mp.memoryTypes[mem_i].propertyFlags & flags) == flags)
             return mem_i;

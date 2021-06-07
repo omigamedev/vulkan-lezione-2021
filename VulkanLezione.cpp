@@ -1,5 +1,6 @@
 #include "window.h"
 #include "resource.h"
+#include "device.h"
 
 #include <vulkan/vulkan.hpp>
 #include <iostream>
@@ -16,9 +17,6 @@
 #include <glm/gtc/random.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
 
 struct vertex_t 
 {
@@ -52,14 +50,6 @@ size_t aligned_size(const std::array<T, N>& v, size_t alignment)
     return aligned_size(sizeof(T) * N, alignment);
 }
 
-
-std::pair<glm::ivec2, std::unique_ptr<uint8_t>> load_image(const char* path)
-{
-    int w, h, c;
-    std::unique_ptr<uint8_t> data(stbi_load(path, &w, &h, &c, 4));
-    return { glm::ivec2(w, h), std::move(data) };
-}
-
 vk::UniqueShaderModule load_shader(const vk::UniqueDevice& device, const std::string& path)
 {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -76,104 +66,22 @@ vk::UniqueShaderModule load_shader(const vk::UniqueDevice& device, const std::st
 
 int main()
 {
-    std::vector<const char*> inst_layers;
-    inst_layers.emplace_back("VK_LAYER_KHRONOS_validation");
-    std::vector<const char*> inst_extensions;
-    inst_extensions.emplace_back(VK_KHR_SURFACE_EXTENSION_NAME);
-    inst_extensions.emplace_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
-
-    vk::ApplicationInfo app_info;
-    app_info.apiVersion = VK_VERSION_1_2;
-    app_info.pApplicationName = "VulcanLezione";
-    app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 1);
-    app_info.pEngineName = "Custom";
-    app_info.engineVersion = VK_MAKE_VERSION(0, 1, 1);
-    vk::InstanceCreateInfo inst_info;
-    inst_info.pApplicationInfo = &app_info;
-    inst_info.setPEnabledLayerNames(inst_layers);
-    inst_info.setPEnabledExtensionNames(inst_extensions);
-
-    vk::UniqueInstance inst = vk::createInstanceUnique(inst_info);
+    Device dev;
+    dev.init_instance();
 
     HWND hWnd = create_window(800, 600);
-    vk::Win32SurfaceCreateInfoKHR surface_info;
-    surface_info.hinstance = GetModuleHandle(NULL);
-    surface_info.hwnd = hWnd;
-    vk::UniqueSurfaceKHR surface = inst->createWin32SurfaceKHRUnique(surface_info);
+    dev.create_device(hWnd);
+    dev.create_swapchain();
 
-    uint32_t device_family_index = 0;
-    vk::PhysicalDevice physical_device;
-    vk::UniqueDevice device;
-    for (auto pd : inst->enumeratePhysicalDevices())
-    {
-        std::vector<vk::QueueFamilyProperties> families = pd.getQueueFamilyProperties();
-        vk::PhysicalDeviceProperties props = pd.getProperties();
-        for (int family_index = 0; family_index < families.size(); family_index++)
-        {
-            if (families[family_index].queueFlags & vk::QueueFlagBits::eGraphics
-                && pd.getSurfaceSupportKHR(family_index, *surface)
-                && props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu)
-            {
-                std::cout << "Device trovato: " << props.deviceName << "\n";
-        
-                device_family_index = family_index;
-                physical_device = pd;
-
-                std::vector<const char*> device_layers;
-                std::vector<const char*> device_extensions;
-                device_extensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-
-                float queue_priority[1] = { 1.f };
-                vk::DeviceQueueCreateInfo queue_info;
-                queue_info.queueFamilyIndex = family_index;
-                queue_info.queueCount = 1;
-                queue_info.pQueuePriorities = queue_priority;
-
-                vk::DeviceCreateInfo device_info;
-                device_info.queueCreateInfoCount = 1;
-                device_info.pQueueCreateInfos = &queue_info;
-                device_info.setPEnabledExtensionNames(device_extensions);
-                device_info.setPEnabledLayerNames(device_layers);
-                device = pd.createDeviceUnique(device_info);
-
-                break;
-            }
-        }
-        if (device)
-            break;
-    }
-    auto limits = physical_device.getProperties().limits;
-
-    vk::SurfaceCapabilitiesKHR surface_caps = physical_device.getSurfaceCapabilitiesKHR(*surface);
-
-    vk::SwapchainCreateInfoKHR swapchain_info;
-    swapchain_info.surface = *surface;
-    swapchain_info.minImageCount = 2;
-    swapchain_info.imageFormat = vk::Format::eB8G8R8A8Unorm;
-    swapchain_info.imageColorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
-    swapchain_info.imageExtent = surface_caps.currentExtent;
-    swapchain_info.imageArrayLayers = 1;
-    swapchain_info.imageUsage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
-    swapchain_info.presentMode = vk::PresentModeKHR::eFifo;
-    swapchain_info.clipped = true;
-    vk::UniqueSwapchainKHR swapchain = device->createSwapchainKHRUnique(swapchain_info);
-
-    vk::Queue q = device->getQueue(device_family_index, 0);
-    vk::CommandPoolCreateInfo pool_info;
-    pool_info.queueFamilyIndex = device_family_index;
-    pool_info.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-    vk::UniqueCommandPool cmd_pool = device->createCommandPoolUnique(pool_info);
-
-    ResourceManager rm{ physical_device, *device, q, *cmd_pool };
+    ResourceManager rm{ dev };
 
     vk::SamplerCreateInfo sampler_info;
     sampler_info.minFilter = vk::Filter::eLinear;
     sampler_info.magFilter = vk::Filter::eLinear;
-    vk::UniqueSampler sampler = device->createSamplerUnique(sampler_info);
+    vk::UniqueSampler sampler = dev.device->createSamplerUnique(sampler_info);
 
     // Load texture
-    auto image = load_image("vulkan-logo.png");
-    auto tex = rm.create_texture2D(image.first, image.second.get());
+    auto tex = rm.load_texture2D("vulkan-logo.png");
 
     // Create Vertex and Index buffer
     std::vector<uint32_t> quad_indices{ 0, 1, 2, 0, 2, 3 };
@@ -199,7 +107,7 @@ int main()
     quad_buffer_info.usage = vk::BufferUsageFlagBits::eIndexBuffer
         | vk::BufferUsageFlagBits::eVertexBuffer
         | vk::BufferUsageFlagBits::eUniformBuffer;
-    vk::UniqueBuffer quad_buffer = device->createBufferUnique(quad_buffer_info);
+    vk::UniqueBuffer quad_buffer = dev.device->createBufferUnique(quad_buffer_info);
     auto quad_buffer_mem = rm.memory.allocate_bind(*quad_buffer,
         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
 
@@ -219,14 +127,14 @@ int main()
     };
     vk::DescriptorSetLayoutCreateInfo descrset_layout_info;
     descrset_layout_info.setBindings(descrset_layout_bindings);
-    vk::UniqueDescriptorSetLayout descrset_layout = device->createDescriptorSetLayoutUnique(descrset_layout_info);
+    vk::UniqueDescriptorSetLayout descrset_layout = dev.device->createDescriptorSetLayoutUnique(descrset_layout_info);
     vk::PipelineLayoutCreateInfo pipeline_layout_info;
     pipeline_layout_info.setSetLayouts(*descrset_layout);
-    vk::UniquePipelineLayout pipeline_layout = device->createPipelineLayoutUnique(pipeline_layout_info);
+    vk::UniquePipelineLayout pipeline_layout = dev.device->createPipelineLayoutUnique(pipeline_layout_info);
 
     // Create RenderPass
     std::vector<vk::AttachmentDescription> renderpass_attachments(1);
-    renderpass_attachments[0].format = swapchain_info.imageFormat;
+    renderpass_attachments[0].format = dev.swapchain_info.imageFormat;
     renderpass_attachments[0].samples = vk::SampleCountFlagBits::e1;
     renderpass_attachments[0].loadOp = vk::AttachmentLoadOp::eClear;
     renderpass_attachments[0].storeOp = vk::AttachmentStoreOp::eStore;
@@ -243,11 +151,11 @@ int main()
     vk::RenderPassCreateInfo renderpass_info;
     renderpass_info.setAttachments(renderpass_attachments);
     renderpass_info.setSubpasses(renderpass_subpasses);
-    vk::UniqueRenderPass renderpass = device->createRenderPassUnique(renderpass_info);
+    vk::UniqueRenderPass renderpass = dev.device->createRenderPassUnique(renderpass_info);
 
     // Load Shader modules
-    auto VertexModule = load_shader(device, "shaders/color-vert.glsl.spv");
-    auto FragmentModule = load_shader(device, "shaders/color-frag.glsl.spv");
+    auto VertexModule = load_shader(dev.device, "shaders/color-vert.glsl.spv");
+    auto FragmentModule = load_shader(dev.device, "shaders/color-frag.glsl.spv");
     
     // Create Pipeline
     std::vector<vk::PipelineShaderStageCreateInfo> pipeline_stages{
@@ -271,9 +179,9 @@ int main()
     pipeline_assembly.primitiveRestartEnable = false;
 
     vk::Viewport viewport{ 0, 0,
-        (float)surface_caps.currentExtent.width, 
-        (float)surface_caps.currentExtent.height };
-    vk::Rect2D scissor{ {}, surface_caps.currentExtent };
+        (float)dev.surface_caps.currentExtent.width, 
+        (float)dev.surface_caps.currentExtent.height };
+    vk::Rect2D scissor{ {}, dev.surface_caps.currentExtent };
     vk::PipelineViewportStateCreateInfo pipeline_viewport;
     pipeline_viewport.setViewports(viewport);
     pipeline_viewport.setScissors(scissor);
@@ -324,7 +232,7 @@ int main()
     pipeline_info.layout = *pipeline_layout;
     pipeline_info.renderPass = *renderpass;
     pipeline_info.subpass = 0;
-    vk::UniquePipeline pipeline = device->createGraphicsPipelineUnique(nullptr, pipeline_info).value;
+    vk::UniquePipeline pipeline = dev.device->createGraphicsPipelineUnique(nullptr, pipeline_info).value;
 
     std::vector<vk::DescriptorPoolSize> descrpool_sizes{
         vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 2},
@@ -333,13 +241,13 @@ int main()
     vk::DescriptorPoolCreateInfo descrpool_info;
     descrpool_info.maxSets = 1;
     descrpool_info.setPoolSizes(descrpool_sizes);
-    vk::UniqueDescriptorPool descrpool = device->createDescriptorPoolUnique(descrpool_info);
+    vk::UniqueDescriptorPool descrpool = dev.device->createDescriptorPoolUnique(descrpool_info);
 
     vk::DescriptorSetAllocateInfo descrset_info;
     descrset_info.descriptorPool = *descrpool;
     descrset_info.descriptorSetCount = 1;
     descrset_info.setSetLayouts(*descrset_layout);
-    vk::UniqueDescriptorSet descrset = std::move(device->allocateDescriptorSetsUnique(descrset_info).front());
+    vk::UniqueDescriptorSet descrset = std::move(dev.device->allocateDescriptorSetsUnique(descrset_info).front());
 
     vk::DescriptorBufferInfo descr_sets_write_uniform_vertex;
     descr_sets_write_uniform_vertex.buffer = *quad_buffer;
@@ -361,12 +269,12 @@ int main()
         vk::WriteDescriptorSet(*descrset, 2, 0, 1, vk::DescriptorType::eCombinedImageSampler,
             &descr_sets_write_tex, nullptr, nullptr),
     };
-    device->updateDescriptorSets(descr_sets_write, nullptr);
+    dev.device->updateDescriptorSets(descr_sets_write, nullptr);
 
-    vk::UniqueFence fence = device->createFenceUnique(vk::FenceCreateInfo());
-    std::vector<vk::Image> swapchain_images = device->getSwapchainImagesKHR(*swapchain);
+    vk::UniqueFence fence = dev.device->createFenceUnique(vk::FenceCreateInfo());
+    std::vector<vk::Image> swapchain_images = dev.device->getSwapchainImagesKHR(*dev.swapchain);
     vk::UniqueCommandBuffer cmd = std::move(
-        device->allocateCommandBuffersUnique({ *cmd_pool, vk::CommandBufferLevel::ePrimary, 1 }).front());
+        dev.device->allocateCommandBuffersUnique({ *dev.cmd_pool, vk::CommandBufferLevel::ePrimary, 1 }).front());
     std::vector<vk::UniqueImageView> swapchain_views(2);
     std::vector<vk::UniqueFramebuffer> framebuffers(2);
     for (int i = 0; i < 2; i++)
@@ -374,17 +282,17 @@ int main()
         vk::ImageViewCreateInfo fb_view_info;
         fb_view_info.image = swapchain_images[i];
         fb_view_info.viewType = vk::ImageViewType::e2D;
-        fb_view_info.format = swapchain_info.imageFormat;
+        fb_view_info.format = dev.swapchain_info.imageFormat;
         fb_view_info.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
-        swapchain_views[i] = device->createImageViewUnique(fb_view_info);
+        swapchain_views[i] = dev.device->createImageViewUnique(fb_view_info);
         
         vk::FramebufferCreateInfo fb_info;
         fb_info.renderPass = *renderpass;
         fb_info.setAttachments(*swapchain_views[i]);
-        fb_info.width = surface_caps.currentExtent.width;
-        fb_info.height = surface_caps.currentExtent.height;
+        fb_info.width = dev.surface_caps.currentExtent.width;
+        fb_info.height = dev.surface_caps.currentExtent.height;
         fb_info.layers = 1;
-        framebuffers[i] = device->createFramebufferUnique(fb_info);
+        framebuffers[i] = dev.device->createFramebufferUnique(fb_info);
     }
 
     MSG msg;
@@ -402,7 +310,7 @@ int main()
         // update uniform
         if (auto map = quad_buffer_mem->map<uint8_t>(quad_uniform_vertex_off, quad_uniform_vertex_size + quad_uniform_fragment_size))
         {
-            float aspect_ratio = (float)image.first.y / (float)image.first.x;
+            float aspect_ratio = (float)tex->info.extent.height / (float)tex->info.extent.width;
             reinterpret_cast<uniform_vertex_t*>(map.ptr)->model = 
                 glm::eulerAngleZ(alpha * 0.1f)
                 * glm::scale(glm::vec3(0.5f, aspect_ratio * 0.5f, 1.f));
@@ -410,7 +318,7 @@ int main()
                 glm::vec4(1, glm::abs(glm::sin(alpha)), 1, 1);
         }
 
-        auto next_image = device->acquireNextImageKHR(*swapchain, UINT64_MAX, nullptr, *fence);
+        auto next_image = dev.device->acquireNextImageKHR(*dev.swapchain, UINT64_MAX, nullptr, *fence);
         if (next_image.result == vk::Result::eSuccess)
         {
             cmd->reset();
@@ -449,19 +357,19 @@ int main()
             vk::CommandBuffer vkcmd = *cmd;
             submit_info.commandBufferCount = 1;
             submit_info.pCommandBuffers = &vkcmd;
-            q.submit(submit_info);
-            q.waitIdle();
+            dev.q.submit(submit_info);
+            dev.q.waitIdle();
 
             vk::Result present_result;
             vk::PresentInfoKHR present_info;
-            present_info.setSwapchains(*swapchain);
+            present_info.setSwapchains(*dev.swapchain);
             present_info.pImageIndices = &next_image.value;
             present_info.pResults = &present_result;
-            q.presentKHR(present_info);
-            q.waitIdle();
+            dev.q.presentKHR(present_info);
+            dev.q.waitIdle();
         }
-        device->waitForFences(*fence, true, UINT64_MAX);
-        device->resetFences(*fence);
+        dev.device->waitForFences(*fence, true, UINT64_MAX);
+        dev.device->resetFences(*fence);
 
     }
     descrset.reset();

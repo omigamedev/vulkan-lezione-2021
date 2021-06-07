@@ -1,4 +1,8 @@
 #include "resource.h"
+#include "device.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 std::shared_ptr<ImageResource> ResourceManager::create_texture2D(glm::ivec2 size, uint8_t* data)
 {
@@ -14,7 +18,7 @@ std::shared_ptr<ImageResource> ResourceManager::create_texture2D(glm::ivec2 size
     tex->info.tiling = vk::ImageTiling::eLinear;
     tex->info.usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
     tex->info.initialLayout = vk::ImageLayout::eUndefined;
-    tex->texture = device.createImageUnique(tex->info);
+    tex->texture = dev.device->createImageUnique(tex->info);
     memory.allocate_bind(*tex->texture, vk::MemoryPropertyFlagBits::eDeviceLocal);
 
     vk::ImageViewCreateInfo tex_view_info;
@@ -27,7 +31,7 @@ std::shared_ptr<ImageResource> ResourceManager::create_texture2D(glm::ivec2 size
     tex_view_info.subresourceRange.levelCount = 1;
     tex_view_info.subresourceRange.baseArrayLayer = 0;
     tex_view_info.subresourceRange.layerCount = 1;
-    tex->view = device.createImageViewUnique(tex_view_info);
+    tex->view = dev.device->createImageViewUnique(tex_view_info);
 
     if (data)
     {
@@ -35,18 +39,18 @@ std::shared_ptr<ImageResource> ResourceManager::create_texture2D(glm::ivec2 size
         vk::BufferCreateInfo buffer_info;
         buffer_info.size = size.x * size.y * 4;
         buffer_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
-        vk::UniqueBuffer buffer = device.createBufferUnique(buffer_info);
+        vk::UniqueBuffer buffer = dev.device->createBufferUnique(buffer_info);
         auto buffer_mem = memory.allocate_bind(*buffer,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
         if (auto map = buffer_mem->map())
             std::copy(data, data + buffer_info.size, map.ptr);
 
         vk::CommandBufferAllocateInfo cmd_tex_info;
-        cmd_tex_info.commandPool = cmd_pool;
+        cmd_tex_info.commandPool = *dev.cmd_pool;
         cmd_tex_info.level = vk::CommandBufferLevel::ePrimary;
         cmd_tex_info.commandBufferCount = 1;
         vk::UniqueCommandBuffer cmd_tex = std::move(
-            device.allocateCommandBuffersUnique(cmd_tex_info).front());
+            dev.device->allocateCommandBuffersUnique(cmd_tex_info).front());
         cmd_tex->begin(vk::CommandBufferBeginInfo({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit }));
         {
             vk::BufferMemoryBarrier buffer_barrier;
@@ -102,8 +106,15 @@ std::shared_ptr<ImageResource> ResourceManager::create_texture2D(glm::ivec2 size
 
         vk::SubmitInfo cmd_tex_submit_info;
         cmd_tex_submit_info.setCommandBuffers(*cmd_tex);
-        queue.submit(cmd_tex_submit_info);
-        queue.waitIdle();
+        dev.q.submit(cmd_tex_submit_info);
+        dev.q.waitIdle();
     }
     return tex;
+}
+
+std::shared_ptr<ImageResource> ResourceManager::load_texture2D(const std::string& path)
+{
+    int w, h, c;
+    std::unique_ptr<uint8_t> data(stbi_load(path.c_str(), &w, &h, &c, 4));
+    return create_texture2D({ w, h }, data.get());
 }

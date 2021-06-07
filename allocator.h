@@ -2,6 +2,8 @@
 #include <map>
 #include <vulkan/vulkan.hpp>
 
+struct Device;
+
 struct MemoryRef : public std::enable_shared_from_this<MemoryRef>
 {
     struct MemoryAllocator* allocator;
@@ -20,7 +22,7 @@ struct MemoryRef : public std::enable_shared_from_this<MemoryRef>
         ~Map()
         {
             if (auto ref = memref.lock())
-                ref->allocator->device.unmapMemory(ref->chunk->device_memory);
+                ref->allocator->dev.device->unmapMemory(ref->chunk->device_memory);
         }
         operator bool() const
         {
@@ -72,23 +74,21 @@ struct MemoryFamily
         : allocation_size(allocation_size), family_index(0) {}
     MemoryFamily(const MemoryFamily&) = delete;
     MemoryFamily& operator=(const MemoryFamily&) = delete;
-    std::shared_ptr<MemoryChunk> allocate(const vk::Device& device, uint32_t family_index, vk::DeviceSize size);
+    std::shared_ptr<MemoryChunk> allocate(Device& dev, uint32_t family_index, vk::DeviceSize size);
     void free(const std::shared_ptr<MemoryChunk>& chunk);
 };
 
 struct MemoryAllocator
 {
+    Device& dev;
     vk::DeviceSize allocation_size;
-    vk::PhysicalDevice physical_device;
-    vk::Device device;
     std::map<uint32_t, MemoryFamily> families;
-    MemoryAllocator(const vk::PhysicalDevice& physical_device, const vk::Device& device, uint32_t allocation_size)
-        : physical_device(physical_device), device(device), allocation_size(allocation_size) {}
+    MemoryAllocator(Device& dev, uint32_t allocation_size)
+        : dev(dev), allocation_size(allocation_size) {}
     std::shared_ptr<MemoryRef> allocate(const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags);
     std::shared_ptr<MemoryRef> allocate(const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags, vk::DeviceSize size);
     void free(const std::shared_ptr<MemoryChunk>& chunk);
     std::shared_ptr<MemoryRef> allocate_bind(const vk::Image& img, vk::MemoryPropertyFlags flags);
     std::shared_ptr<MemoryRef> allocate_bind(const vk::Buffer& buffer, vk::MemoryPropertyFlags flags);
-    uint32_t find_memory(const vk::PhysicalDevice& physical_device,
-        const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags);
+    uint32_t find_memory(const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags);
 };
