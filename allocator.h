@@ -27,8 +27,8 @@ struct MemoryRef : public std::enable_shared_from_this<MemoryRef>
             return ptr != nullptr;
         }
     };
-    template<typename T>
-    Map<T> map(vk::DeviceAddress offset, vk::DeviceSize size /*= VK_WHOLE_SIZE*/)
+    template<typename T = uint8_t>
+    Map<T> map(vk::DeviceAddress offset = 0, vk::DeviceSize size = VK_WHOLE_SIZE)
     {
         return { reinterpret_cast<T*>(map_internal(offset, size)), shared_from_this() };
     }

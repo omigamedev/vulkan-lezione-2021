@@ -31,31 +31,15 @@ std::shared_ptr<ImageResource> ResourceManager::create_texture2D(glm::ivec2 size
 
     if (data)
     {
-        // Create staging texture
-        vk::ImageCreateInfo staging_info;
-        staging_info.imageType = vk::ImageType::e2D;
-        staging_info.format = tex->info.format;
-        staging_info.extent = vk::Extent3D(size.x, size.y, 1);
-        staging_info.mipLevels = 1;
-        staging_info.arrayLayers = 1;
-        staging_info.samples = vk::SampleCountFlagBits::e1;
-        staging_info.tiling = vk::ImageTiling::eLinear;
-        staging_info.usage = vk::ImageUsageFlagBits::eTransferSrc;
-        staging_info.initialLayout = vk::ImageLayout::ePreinitialized;
-        vk::UniqueImage staging = device.createImageUnique(staging_info);
-        auto staging_mem_chunk = memory.allocate_bind(*staging,
+        // Create staging buffer
+        vk::BufferCreateInfo buffer_info;
+        buffer_info.size = size.x * size.y * 4;
+        buffer_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
+        vk::UniqueBuffer buffer = device.createBufferUnique(buffer_info);
+        auto buffer_mem = memory.allocate_bind(*buffer,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-        vk::SubresourceLayout staging_layout = device.getImageSubresourceLayout(*staging,
-            vk::ImageSubresource(vk::ImageAspectFlagBits::eColor, 0, 0));
-        if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device.mapMemory(staging_mem_chunk->chunk->device_memory, 0, VK_WHOLE_SIZE)))
-        {
-            for (int row = 0; row < size.y; row++)
-                std::copy_n(
-                    data + row * size.x * 4,
-                    size.x * 4,
-                    ptr + row * staging_layout.rowPitch);
-            device.unmapMemory(staging_mem_chunk->chunk->device_memory);
-        }
+        if (auto map = buffer_mem->map())
+            std::copy(data, data + buffer_info.size, map.ptr);
 
         vk::CommandBufferAllocateInfo cmd_tex_info;
         cmd_tex_info.commandPool = cmd_pool;
@@ -65,54 +49,54 @@ std::shared_ptr<ImageResource> ResourceManager::create_texture2D(glm::ivec2 size
             device.allocateCommandBuffersUnique(cmd_tex_info).front());
         cmd_tex->begin(vk::CommandBufferBeginInfo({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit }));
         {
-            vk::ImageMemoryBarrier barrier;
-            barrier.subresourceRange = tex_view_info.subresourceRange;
-
-            barrier.image = *staging;
-            barrier.srcAccessMask = {};
-            barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
-            barrier.oldLayout = vk::ImageLayout::ePreinitialized;
-            barrier.newLayout = vk::ImageLayout::eTransferSrcOptimal;
+            vk::BufferMemoryBarrier buffer_barrier;
+            buffer_barrier.srcAccessMask = {};
+            buffer_barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+            buffer_barrier.buffer = *buffer;
+            buffer_barrier.size = buffer_info.size;
+            buffer_barrier.offset = 0;
             cmd_tex->pipelineBarrier(
                 vk::PipelineStageFlagBits::eAllCommands,
                 vk::PipelineStageFlagBits::eTransfer,
                 vk::DependencyFlagBits::eByRegion,
-                nullptr, nullptr, barrier);
+                nullptr, buffer_barrier, nullptr);
 
-            barrier.image = *tex->texture;
-            barrier.srcAccessMask = {};
-            barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
-            barrier.oldLayout = vk::ImageLayout::eUndefined;
-            barrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+            vk::ImageMemoryBarrier img_barrier;
+            img_barrier.subresourceRange = tex_view_info.subresourceRange;
+            img_barrier.image = *tex->texture;
+            
+            img_barrier.srcAccessMask = {};
+            img_barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+            img_barrier.oldLayout = vk::ImageLayout::eUndefined;
+            img_barrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
             cmd_tex->pipelineBarrier(
                 vk::PipelineStageFlagBits::eAllCommands,
                 vk::PipelineStageFlagBits::eTransfer,
                 vk::DependencyFlagBits::eByRegion,
-                nullptr, nullptr, barrier);
+                nullptr, nullptr, img_barrier);
 
-            vk::ImageCopy copy;
-            copy.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-            copy.srcSubresource.mipLevel = 0;
-            copy.srcSubresource.baseArrayLayer = 0;
-            copy.srcSubresource.layerCount = 1;
-            copy.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-            copy.dstSubresource.mipLevel = 0;
-            copy.dstSubresource.baseArrayLayer = 0;
-            copy.dstSubresource.layerCount = 1;
-            copy.extent = tex->info.extent;
-            cmd_tex->copyImage(*staging, vk::ImageLayout::eTransferSrcOptimal,
+            vk::BufferImageCopy copy;
+            copy.bufferOffset = 0;
+            copy.bufferRowLength = size.x;
+            copy.bufferImageHeight = size.y;
+            copy.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+            copy.imageSubresource.mipLevel = 0;
+            copy.imageSubresource.baseArrayLayer = 0;
+            copy.imageSubresource.layerCount = 1;
+            copy.imageOffset = vk::Offset3D();
+            copy.imageExtent = tex->info.extent;
+            cmd_tex->copyBufferToImage(*buffer,
                 *tex->texture, vk::ImageLayout::eTransferDstOptimal, copy);
 
-            barrier.image = *tex->texture;
-            barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-            barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
-            barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
-            barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            img_barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+            img_barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+            img_barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+            img_barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
             cmd_tex->pipelineBarrier(
                 vk::PipelineStageFlagBits::eTransfer,
                 vk::PipelineStageFlagBits::eFragmentShader,
                 vk::DependencyFlagBits::eByRegion,
-                nullptr, nullptr, barrier);
+                nullptr, nullptr, img_barrier);
         }
         cmd_tex->end();
 
