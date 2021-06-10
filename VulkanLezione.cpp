@@ -1,3 +1,8 @@
+#include "allocator.h"
+#include "window.h"
+#include "device.h"
+#include "resource.h"
+
 #include <vulkan/vulkan.hpp>
 #include <iostream>
 #include <vector>
@@ -13,9 +18,6 @@
 #include <glm/gtc/random.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
 
 struct vertex_t 
 {
@@ -49,50 +51,6 @@ size_t aligned_size(const std::array<T, N>& v, size_t alignment)
     return aligned_size(sizeof(T) * N, alignment);
 }
 
-LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg)
-    {
-    case WM_CREATE:
-        return 0; // Everything is fine, continue with creation.
-    case WM_CLOSE:
-        PostQuitMessage(EXIT_SUCCESS);
-        return 0;
-    case WM_MOUSEMOVE:
-        break;
-    }
-    return DefWindowProc(hWnd, msg, wp, lp);
-}
-
-HWND create_window(int width, int height)
-{
-    WNDCLASS wc{};
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = wnd_proc;
-    wc.cbClsExtra = 0;
-    wc.cbWndExtra = 0;
-    wc.hInstance = GetModuleHandle(nullptr);
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
-    wc.lpszMenuName = nullptr;
-    wc.lpszClassName = TEXT("Vulkan Window");
-    if (!RegisterClass(&wc))
-        return NULL;
-    RECT r = { 0, 0, width, height };
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, false);
-    return CreateWindow(wc.lpszClassName, TEXT("Vulkan"),
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
-        r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, nullptr);
-}
-
-std::pair<glm::ivec2, std::unique_ptr<uint8_t>> load_image(const char* path)
-{
-    int w, h, c;
-    std::unique_ptr<uint8_t> data(stbi_load(path, &w, &h, &c, 4));
-    return { glm::ivec2(w, h), std::move(data) };
-}
-
 vk::UniqueShaderModule load_shader(const vk::UniqueDevice& device, const std::string& path)
 {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -107,233 +65,24 @@ vk::UniqueShaderModule load_shader(const vk::UniqueDevice& device, const std::st
     return device->createShaderModuleUnique(module_info);
 }
 
-uint32_t find_memory(const vk::PhysicalDevice& physical_device, 
-    const vk::MemoryRequirements& req, vk::MemoryPropertyFlags flags)
-{
-    static vk::PhysicalDeviceMemoryProperties mp = physical_device.getMemoryProperties();
-    for (uint32_t mem_i = 0; mem_i < mp.memoryTypeCount; mem_i++)
-        if ((1 << mem_i) & req.memoryTypeBits && (mp.memoryTypes[mem_i].propertyFlags & flags) == flags)
-            return mem_i;
-    throw std::runtime_error("find_memory failed");
-}
-
 int main()
 {
-    std::vector<const char*> inst_layers;
-    inst_layers.emplace_back("VK_LAYER_KHRONOS_validation");
-    std::vector<const char*> inst_extensions;
-    inst_extensions.emplace_back(VK_KHR_SURFACE_EXTENSION_NAME);
-    inst_extensions.emplace_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
-
-    vk::ApplicationInfo app_info;
-    app_info.apiVersion = VK_VERSION_1_2;
-    app_info.pApplicationName = "VulcanLezione";
-    app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 1);
-    app_info.pEngineName = "Custom";
-    app_info.engineVersion = VK_MAKE_VERSION(0, 1, 1);
-    vk::InstanceCreateInfo inst_info;
-    inst_info.pApplicationInfo = &app_info;
-    inst_info.setPEnabledLayerNames(inst_layers);
-    inst_info.setPEnabledExtensionNames(inst_extensions);
-
-    vk::UniqueInstance inst = vk::createInstanceUnique(inst_info);
-
+    Device device;
+    device.init_instance();
     HWND hWnd = create_window(800, 600);
-    vk::Win32SurfaceCreateInfoKHR surface_info;
-    surface_info.hinstance = GetModuleHandle(NULL);
-    surface_info.hwnd = hWnd;
-    vk::UniqueSurfaceKHR surface = inst->createWin32SurfaceKHRUnique(surface_info);
+    device.create_device(hWnd);
+    device.create_swapchain();
 
-    uint32_t device_family_index = 0;
-    vk::PhysicalDevice physical_device;
-    vk::UniqueDevice device;
-    for (auto pd : inst->enumeratePhysicalDevices())
-    {
-        std::vector<vk::QueueFamilyProperties> families = pd.getQueueFamilyProperties();
-        vk::PhysicalDeviceProperties props = pd.getProperties();
-        for (int family_index = 0; family_index < families.size(); family_index++)
-        {
-            if (families[family_index].queueFlags & vk::QueueFlagBits::eGraphics
-                && pd.getSurfaceSupportKHR(family_index, *surface)
-                && props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu)
-            {
-                std::cout << "Device trovato: " << props.deviceName << "\n";
-        
-                device_family_index = family_index;
-                physical_device = pd;
-
-                std::vector<const char*> device_layers;
-                std::vector<const char*> device_extensions;
-                device_extensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-
-                float queue_priority[1] = { 1.f };
-                vk::DeviceQueueCreateInfo queue_info;
-                queue_info.queueFamilyIndex = family_index;
-                queue_info.queueCount = 1;
-                queue_info.pQueuePriorities = queue_priority;
-
-                vk::DeviceCreateInfo device_info;
-                device_info.queueCreateInfoCount = 1;
-                device_info.pQueueCreateInfos = &queue_info;
-                device_info.setPEnabledExtensionNames(device_extensions);
-                device_info.setPEnabledLayerNames(device_layers);
-                device = pd.createDeviceUnique(device_info);
-
-                break;
-            }
-        }
-        if (device)
-            break;
-    }
-
-    vk::SurfaceCapabilitiesKHR surface_caps = physical_device.getSurfaceCapabilitiesKHR(*surface);
-
-    vk::SwapchainCreateInfoKHR swapchain_info;
-    swapchain_info.surface = *surface;
-    swapchain_info.minImageCount = 2;
-    swapchain_info.imageFormat = vk::Format::eB8G8R8A8Unorm;
-    swapchain_info.imageColorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
-    swapchain_info.imageExtent = surface_caps.currentExtent;
-    swapchain_info.imageArrayLayers = 1;
-    swapchain_info.imageUsage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
-    swapchain_info.presentMode = vk::PresentModeKHR::eFifo;
-    swapchain_info.clipped = true;
-    vk::UniqueSwapchainKHR swapchain = device->createSwapchainKHRUnique(swapchain_info);
-
-    vk::Queue q = device->getQueue(device_family_index, 0);
-    vk::CommandPoolCreateInfo pool_info;
-    pool_info.queueFamilyIndex = device_family_index;
-    pool_info.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-    vk::UniqueCommandPool cmd_pool = device->createCommandPoolUnique(pool_info);
+    MemoryAllocator ma(device, 64 << 20);
+    ResourceManager rm(device, ma);
 
     // Load texture
-    auto image = load_image("vulkan-logo.png");
-    // Create staging texture
-    vk::ImageCreateInfo staging_info;
-    staging_info.imageType = vk::ImageType::e2D;
-    staging_info.format = vk::Format::eR8G8B8A8Unorm;
-    staging_info.extent = vk::Extent3D(image.first.x, image.first.y, 1);
-    staging_info.mipLevels = 1;
-    staging_info.arrayLayers = 1;
-    staging_info.samples = vk::SampleCountFlagBits::e1;
-    staging_info.tiling = vk::ImageTiling::eLinear;
-    staging_info.usage = vk::ImageUsageFlagBits::eTransferSrc;
-    staging_info.initialLayout = vk::ImageLayout::ePreinitialized;
-    vk::UniqueImage staging = device->createImageUnique(staging_info);
-    vk::MemoryRequirements staging_mem_req = device->getImageMemoryRequirements(*staging);
-    uint32_t staging_mem_idx = find_memory(physical_device, staging_mem_req,
-        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-    vk::UniqueDeviceMemory staging_mem = device->allocateMemoryUnique({ staging_mem_req.size, staging_mem_idx });
-    device->bindImageMemory(*staging, *staging_mem, 0);
-    vk::SubresourceLayout staging_layout = device->getImageSubresourceLayout(*staging,
-        vk::ImageSubresource(vk::ImageAspectFlagBits::eColor, 0, 0));
-    if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*staging_mem, 0, VK_WHOLE_SIZE)))
-    {
-        for (int row = 0; row < image.first.y; row++)
-            std::copy_n(
-                image.second.get() + row * image.first.x * 4,
-                image.first.x * 4,
-                ptr + row * staging_layout.rowPitch);
-        device->unmapMemory(*staging_mem);
-    }
-
-    vk::ImageCreateInfo tex_info;
-    tex_info.imageType = vk::ImageType::e2D;
-    tex_info.format = vk::Format::eR8G8B8A8Unorm;
-    tex_info.extent = vk::Extent3D(image.first.x, image.first.y, 1);
-    tex_info.mipLevels = 1;
-    tex_info.arrayLayers = 1;
-    tex_info.samples = vk::SampleCountFlagBits::e1;
-    tex_info.tiling = vk::ImageTiling::eLinear;
-    tex_info.usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
-    tex_info.initialLayout = vk::ImageLayout::eUndefined;
-    vk::UniqueImage tex = device->createImageUnique(tex_info);
-    vk::MemoryRequirements tex_mem_req = device->getImageMemoryRequirements(*tex);
-    uint32_t tex_mem_idx = find_memory(physical_device, tex_mem_req,
-        vk::MemoryPropertyFlagBits::eDeviceLocal);
-    vk::UniqueDeviceMemory tex_mem = device->allocateMemoryUnique({ tex_mem_req.size, tex_mem_idx });
-    device->bindImageMemory(*tex, *tex_mem, 0);
-
-    vk::ImageViewCreateInfo tex_view_info;
-    tex_view_info.image = *tex;
-    tex_view_info.viewType = vk::ImageViewType::e2D;
-    tex_view_info.format = staging_info.format;
-    tex_view_info.components = vk::ComponentMapping();
-    tex_view_info.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
-    tex_view_info.subresourceRange.baseMipLevel = 0;
-    tex_view_info.subresourceRange.levelCount = 1;
-    tex_view_info.subresourceRange.baseArrayLayer = 0;
-    tex_view_info.subresourceRange.layerCount = 1;
-    vk::UniqueImageView tex_view = device->createImageViewUnique(tex_view_info);
+    auto tex = rm.load_texture2D("vulkan-logo.png");
 
     vk::SamplerCreateInfo sampler_info;
     sampler_info.minFilter = vk::Filter::eLinear;
     sampler_info.magFilter = vk::Filter::eLinear;
-    vk::UniqueSampler sampler = device->createSamplerUnique(sampler_info);
-
-    vk::CommandBufferAllocateInfo cmd_tex_info;
-    cmd_tex_info.commandPool = *cmd_pool;
-    cmd_tex_info.level = vk::CommandBufferLevel::ePrimary;
-    cmd_tex_info.commandBufferCount = 1;
-    vk::UniqueCommandBuffer cmd_tex = std::move(
-        device->allocateCommandBuffersUnique(cmd_tex_info).front());
-    cmd_tex->begin(vk::CommandBufferBeginInfo({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit }));
-    {
-        vk::ImageMemoryBarrier barrier;
-        barrier.subresourceRange = tex_view_info.subresourceRange;
-
-        barrier.image = *staging;
-        barrier.srcAccessMask = {};
-        barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead;
-        barrier.oldLayout = vk::ImageLayout::ePreinitialized;
-        barrier.newLayout = vk::ImageLayout::eTransferSrcOptimal;
-        cmd_tex->pipelineBarrier(
-            vk::PipelineStageFlagBits::eAllCommands,
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::DependencyFlagBits::eByRegion,
-            nullptr, nullptr, barrier);
-
-        barrier.image = *tex;
-        barrier.srcAccessMask = {};
-        barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
-        barrier.oldLayout = vk::ImageLayout::eUndefined;
-        barrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
-        cmd_tex->pipelineBarrier(
-            vk::PipelineStageFlagBits::eAllCommands,
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::DependencyFlagBits::eByRegion,
-            nullptr, nullptr, barrier);
-
-        vk::ImageCopy copy;
-        copy.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-        copy.srcSubresource.mipLevel = 0;
-        copy.srcSubresource.baseArrayLayer = 0;
-        copy.srcSubresource.layerCount = 1;
-        copy.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-        copy.dstSubresource.mipLevel = 0;
-        copy.dstSubresource.baseArrayLayer = 0;
-        copy.dstSubresource.layerCount = 1;
-        copy.extent = tex_info.extent;
-        cmd_tex->copyImage(*staging, vk::ImageLayout::eTransferSrcOptimal,
-            *tex, vk::ImageLayout::eTransferDstOptimal, copy);
-    
-        barrier.image = *tex;
-        barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-        barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
-        barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
-        barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
-        cmd_tex->pipelineBarrier(
-            vk::PipelineStageFlagBits::eTransfer,
-            vk::PipelineStageFlagBits::eFragmentShader,
-            vk::DependencyFlagBits::eByRegion,
-            nullptr, nullptr, barrier);
-    }
-    cmd_tex->end();
-
-    vk::SubmitInfo cmd_tex_submit_info;
-    cmd_tex_submit_info.setCommandBuffers(*cmd_tex);
-    q.submit(cmd_tex_submit_info);
-    q.waitIdle();
+    vk::UniqueSampler sampler = device.device->createSamplerUnique(sampler_info);
 
     // Create Vertex and Index buffer
     std::vector<uint32_t> quad_indices{ 0, 1, 2, 0, 2, 3 };
@@ -359,23 +108,18 @@ int main()
     quad_buffer_info.usage = vk::BufferUsageFlagBits::eIndexBuffer
         | vk::BufferUsageFlagBits::eVertexBuffer
         | vk::BufferUsageFlagBits::eUniformBuffer;
-    vk::UniqueBuffer quad_buffer = device->createBufferUnique(quad_buffer_info);
-    vk::MemoryRequirements quad_buffer_req = device->getBufferMemoryRequirements(*quad_buffer);
-    uint32_t quad_memory_index = find_memory(physical_device, quad_buffer_req,
+    vk::UniqueBuffer quad_buffer = device.device->createBufferUnique(quad_buffer_info);
+    vk::MemoryRequirements quad_buffer_req = device.device->getBufferMemoryRequirements(*quad_buffer);
+    auto quad_buffer_mem = ma.allocate(quad_buffer_req,
         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
-    vk::MemoryAllocateInfo quad_buffer_mem_info;
-    quad_buffer_mem_info.allocationSize = quad_buffer_req.size;
-    quad_buffer_mem_info.memoryTypeIndex = quad_memory_index;
-    vk::UniqueDeviceMemory quad_buffer_mem = device->allocateMemoryUnique(quad_buffer_mem_info);
-    device->bindBufferMemory(*quad_buffer, *quad_buffer_mem, 0);
+    device.device->bindBufferMemory(*quad_buffer, quad_buffer_mem->chunk->device_memory, quad_buffer_mem->chunk->offset);
 
-    if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*quad_buffer_mem, 0, VK_WHOLE_SIZE)))
+    if (auto map = quad_buffer_mem->map(0, VK_WHOLE_SIZE))
     {
         std::copy(quad_indices.begin(), quad_indices.end(), 
-            reinterpret_cast<uint32_t*>(ptr + quad_indices_off));
+            reinterpret_cast<uint32_t*>(map.ptr + quad_indices_off));
         std::copy(quad_vertices.begin(), quad_vertices.end(), 
-            reinterpret_cast<vertex_t*>(ptr + quad_vertices_off));
-        device->unmapMemory(*quad_buffer_mem);
+            reinterpret_cast<vertex_t*>(map.ptr + quad_vertices_off));
     }
 
     // Pipeline Layout
@@ -386,14 +130,14 @@ int main()
     };
     vk::DescriptorSetLayoutCreateInfo descrset_layout_info;
     descrset_layout_info.setBindings(descrset_layout_bindings);
-    vk::UniqueDescriptorSetLayout descrset_layout = device->createDescriptorSetLayoutUnique(descrset_layout_info);
+    vk::UniqueDescriptorSetLayout descrset_layout = device.device->createDescriptorSetLayoutUnique(descrset_layout_info);
     vk::PipelineLayoutCreateInfo pipeline_layout_info;
     pipeline_layout_info.setSetLayouts(*descrset_layout);
-    vk::UniquePipelineLayout pipeline_layout = device->createPipelineLayoutUnique(pipeline_layout_info);
+    vk::UniquePipelineLayout pipeline_layout = device.device->createPipelineLayoutUnique(pipeline_layout_info);
 
     // Create RenderPass
     std::vector<vk::AttachmentDescription> renderpass_attachments(1);
-    renderpass_attachments[0].format = swapchain_info.imageFormat;
+    renderpass_attachments[0].format = device.swapchain_info.imageFormat;
     renderpass_attachments[0].samples = vk::SampleCountFlagBits::e1;
     renderpass_attachments[0].loadOp = vk::AttachmentLoadOp::eClear;
     renderpass_attachments[0].storeOp = vk::AttachmentStoreOp::eStore;
@@ -410,11 +154,11 @@ int main()
     vk::RenderPassCreateInfo renderpass_info;
     renderpass_info.setAttachments(renderpass_attachments);
     renderpass_info.setSubpasses(renderpass_subpasses);
-    vk::UniqueRenderPass renderpass = device->createRenderPassUnique(renderpass_info);
+    vk::UniqueRenderPass renderpass = device.device->createRenderPassUnique(renderpass_info);
 
     // Load Shader modules
-    auto VertexModule = load_shader(device, "shaders/color-vert.glsl.spv");
-    auto FragmentModule = load_shader(device, "shaders/color-frag.glsl.spv");
+    auto VertexModule = load_shader(device.device, "shaders/color-vert.glsl.spv");
+    auto FragmentModule = load_shader(device.device, "shaders/color-frag.glsl.spv");
     
     // Create Pipeline
     std::vector<vk::PipelineShaderStageCreateInfo> pipeline_stages{
@@ -438,9 +182,9 @@ int main()
     pipeline_assembly.primitiveRestartEnable = false;
 
     vk::Viewport viewport{ 0, 0,
-        (float)surface_caps.currentExtent.width, 
-        (float)surface_caps.currentExtent.height };
-    vk::Rect2D scissor{ {}, surface_caps.currentExtent };
+        (float)device.surface_caps.currentExtent.width,
+        (float)device.surface_caps.currentExtent.height };
+    vk::Rect2D scissor{ {}, device.surface_caps.currentExtent };
     vk::PipelineViewportStateCreateInfo pipeline_viewport;
     pipeline_viewport.setViewports(viewport);
     pipeline_viewport.setScissors(scissor);
@@ -491,7 +235,7 @@ int main()
     pipeline_info.layout = *pipeline_layout;
     pipeline_info.renderPass = *renderpass;
     pipeline_info.subpass = 0;
-    vk::UniquePipeline pipeline = device->createGraphicsPipelineUnique(nullptr, pipeline_info).value;
+    vk::UniquePipeline pipeline = device.device->createGraphicsPipelineUnique(nullptr, pipeline_info).value;
 
     std::vector<vk::DescriptorPoolSize> descrpool_sizes{
         vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 2},
@@ -500,13 +244,13 @@ int main()
     vk::DescriptorPoolCreateInfo descrpool_info;
     descrpool_info.maxSets = 1;
     descrpool_info.setPoolSizes(descrpool_sizes);
-    vk::UniqueDescriptorPool descrpool = device->createDescriptorPoolUnique(descrpool_info);
+    vk::UniqueDescriptorPool descrpool = device.device->createDescriptorPoolUnique(descrpool_info);
 
     vk::DescriptorSetAllocateInfo descrset_info;
     descrset_info.descriptorPool = *descrpool;
     descrset_info.descriptorSetCount = 1;
     descrset_info.setSetLayouts(*descrset_layout);
-    vk::UniqueDescriptorSet descrset = std::move(device->allocateDescriptorSetsUnique(descrset_info).front());
+    vk::UniqueDescriptorSet descrset = std::move(device.device->allocateDescriptorSetsUnique(descrset_info).front());
 
     vk::DescriptorBufferInfo descr_sets_write_uniform_vertex;
     descr_sets_write_uniform_vertex.buffer = *quad_buffer;
@@ -518,7 +262,7 @@ int main()
     descr_sets_write_uniform_fragment.range = quad_uniform_fragment_size;
     vk::DescriptorImageInfo descr_sets_write_tex;
     descr_sets_write_tex.sampler = *sampler;
-    descr_sets_write_tex.imageView = *tex_view;
+    descr_sets_write_tex.imageView = *tex->view;
     descr_sets_write_tex.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
     std::vector<vk::WriteDescriptorSet> descr_sets_write{
         vk::WriteDescriptorSet(*descrset, 0, 0, 1, vk::DescriptorType::eUniformBuffer, 
@@ -528,12 +272,12 @@ int main()
         vk::WriteDescriptorSet(*descrset, 2, 0, 1, vk::DescriptorType::eCombinedImageSampler,
             &descr_sets_write_tex, nullptr, nullptr),
     };
-    device->updateDescriptorSets(descr_sets_write, nullptr);
+    device.device->updateDescriptorSets(descr_sets_write, nullptr);
 
-    vk::UniqueFence fence = device->createFenceUnique(vk::FenceCreateInfo());
-    std::vector<vk::Image> swapchain_images = device->getSwapchainImagesKHR(*swapchain);
+    vk::UniqueFence fence = device.device->createFenceUnique(vk::FenceCreateInfo());
+    std::vector<vk::Image> swapchain_images = device.device->getSwapchainImagesKHR(*device.swapchain);
     vk::UniqueCommandBuffer cmd = std::move(
-        device->allocateCommandBuffersUnique({ *cmd_pool, vk::CommandBufferLevel::ePrimary, 1 }).front());
+        device.device->allocateCommandBuffersUnique({ *device.cmd_pool, vk::CommandBufferLevel::ePrimary, 1 }).front());
     std::vector<vk::UniqueImageView> swapchain_views(2);
     std::vector<vk::UniqueFramebuffer> framebuffers(2);
     for (int i = 0; i < 2; i++)
@@ -541,17 +285,17 @@ int main()
         vk::ImageViewCreateInfo fb_view_info;
         fb_view_info.image = swapchain_images[i];
         fb_view_info.viewType = vk::ImageViewType::e2D;
-        fb_view_info.format = swapchain_info.imageFormat;
+        fb_view_info.format = device.swapchain_info.imageFormat;
         fb_view_info.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
-        swapchain_views[i] = device->createImageViewUnique(fb_view_info);
+        swapchain_views[i] = device.device->createImageViewUnique(fb_view_info);
         
         vk::FramebufferCreateInfo fb_info;
         fb_info.renderPass = *renderpass;
         fb_info.setAttachments(*swapchain_views[i]);
-        fb_info.width = surface_caps.currentExtent.width;
-        fb_info.height = surface_caps.currentExtent.height;
+        fb_info.width = device.surface_caps.currentExtent.width;
+        fb_info.height = device.surface_caps.currentExtent.height;
         fb_info.layers = 1;
-        framebuffers[i] = device->createFramebufferUnique(fb_info);
+        framebuffers[i] = device.device->createFramebufferUnique(fb_info);
     }
 
     MSG msg;
@@ -567,19 +311,18 @@ int main()
         alpha += 0.1f;
 
         // update uniform
-        if (uint8_t* ptr = reinterpret_cast<uint8_t*>(device->mapMemory(*quad_buffer_mem, 
-            quad_uniform_vertex_off, quad_uniform_vertex_size + quad_uniform_fragment_size)))
+        if (auto map = quad_buffer_mem->map(quad_uniform_vertex_off, 
+            quad_uniform_vertex_size + quad_uniform_fragment_size))
         {
-            float aspect_ratio = (float)image.first.y / (float)image.first.x;
-            reinterpret_cast<uniform_vertex_t*>(ptr)->model = 
+            float aspect_ratio = (float)tex->info.extent.height / (float)tex->info.extent.width;
+            reinterpret_cast<uniform_vertex_t*>(map.ptr)->model = 
                 glm::eulerAngleZ(alpha * 0.1f)
                 * glm::scale(glm::vec3(0.5f, aspect_ratio * 0.5f, 1.f));
-            reinterpret_cast<uniform_fragment_t*>(ptr + quad_uniform_vertex_size)->tint = 
+            reinterpret_cast<uniform_fragment_t*>(map.ptr + quad_uniform_vertex_size)->tint = 
                 glm::vec4(1, glm::abs(glm::sin(alpha)), 1, 1);
-            device->unmapMemory(*quad_buffer_mem);
         }
 
-        auto next_image = device->acquireNextImageKHR(*swapchain, UINT64_MAX, nullptr, *fence);
+        auto next_image = device.device->acquireNextImageKHR(*device.swapchain, UINT64_MAX, nullptr, *fence);
         if (next_image.result == vk::Result::eSuccess)
         {
             cmd->reset();
@@ -618,19 +361,19 @@ int main()
             vk::CommandBuffer vkcmd = *cmd;
             submit_info.commandBufferCount = 1;
             submit_info.pCommandBuffers = &vkcmd;
-            q.submit(submit_info);
-            q.waitIdle();
+            device.q.submit(submit_info);
+            device.q.waitIdle();
 
             vk::Result present_result;
             vk::PresentInfoKHR present_info;
-            present_info.setSwapchains(*swapchain);
+            present_info.setSwapchains(*device.swapchain);
             present_info.pImageIndices = &next_image.value;
             present_info.pResults = &present_result;
-            q.presentKHR(present_info);
-            q.waitIdle();
+            device.q.presentKHR(present_info);
+            device.q.waitIdle();
         }
-        device->waitForFences(*fence, true, UINT64_MAX);
-        device->resetFences(*fence);
+        device.device->waitForFences(*fence, true, UINT64_MAX);
+        device.device->resetFences(*fence);
 
     }
     descrset.reset();
