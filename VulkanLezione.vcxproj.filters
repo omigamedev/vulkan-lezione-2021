@@ -17,6 +17,10 @@
       <UniqueIdentifier>{03bcfa58-46b4-42f5-ab95-91cc5734b97f}</UniqueIdentifier>
       <Extensions>glsl</Extensions>
     </Filter>
+    <Filter Include="Lib">
+      <UniqueIdentifier>{367b0d41-9703-4b7e-ad81-c98963216fd9}</UniqueIdentifier>
+      <Extensions>lib;dll</Extensions>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="VulkanLezione.cpp">
@@ -56,5 +60,10 @@
     <ClInclude Include="resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="libs\assimp\bin\assimp-vc142-mt.dll">
+      <Filter>Lib</Filter>
+    </None>
   </ItemGroup>
 </Project>

@@ -5,11 +5,7 @@
 
 #include <vulkan/vulkan.hpp>
 #include <iostream>
-#include <vector>
 #include <fstream>
-#include <deque>
-#include <map>
-#include <list>
 
 #define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
@@ -18,6 +14,11 @@
 #include <glm/gtc/random.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+#include <assimp/matrix4x4.h>
 
 struct vertex_t 
 {
